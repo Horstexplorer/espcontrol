@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -53,6 +54,35 @@ jobs:
           mkdir -p "${NPM_CACHE}"
           npm ci --prefer-offline --cache "${NPM_CACHE}"
           bash scripts/prune_actions_cache.sh "${NPM_CACHE}" "${ESPCONTROL_NPM_CACHE_MAX_MB}" --strategy reset
+
+      - name: Download verified release web assets
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v8
+        with:
+          name: release-web-assets
+          path: release-web-assets
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Use verified release web assets
+        if: github.event_name == 'workflow_run'
+        run: cp -a release-web-assets/. docs/public/webserver/
+
+      - name: Prepare published release web assets
+        if: github.event_name != 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_TAG=$(gh release list --limit 30 --json tagName,isDraft \
+            --jq '[.[] | select(.isDraft == false) | .tagName][0] // ""')
+          if [ -z "${RELEASE_TAG}" ]; then
+            echo "No published release exists yet; keeping the checked-in web asset compatibility list."
+            exit 0
+          fi
+          python3 scripts/prepare_release_web_assets.py "${RELEASE_TAG}"
+          python3 scripts/build.py www --retain-current-bundle
+          python3 scripts/build.py www --check --retain-current-bundle
 
       - name: Build docs
         run: npm run docs:build
