@@ -128,6 +128,40 @@ pulled up to 3.3V through resistors on this board, with no GPIO connection —
 so there's no software-controlled reset/power-down pin to set for this
 particular panel revision; leave `reset_pin`/`power_down_pin` unset.
 
+Because SCCB shares the bus with other I2C peripherals (e.g. the panel's
+touchscreen), this component intentionally sets up *after* them
+(`setup_priority::PROCESSOR`, below the `setup_priority::DATA` that
+touchscreens and most other I2C peripherals default to). The initial sensor
+mode configuration is a large one-shot burst of SCCB register writes,
+immediately followed by a background task that keeps using the bus while
+streaming; sharing the bus with a peripheral that's still in the middle of
+its own timing-sensitive setup (e.g. a touch controller uploading firmware)
+has been observed to corrupt that peripheral's I2C transactions and leave it
+failed. If you still see I2C errors on another peripheral right after this
+component's setup log line, try moving that peripheral's config earlier in
+your YAML (equal-priority components set up in declaration order) or, in
+rare cases where it uses a lower/equal priority itself, raising its priority
+explicitly with `component.set_priority` / device-specific config.
+
+## ISP throughput (RGB565/RGB888 at high resolution)
+
+Converting RAW Bayer data to RGB565/RGB888 in real time via the ESP32-P4's
+hardware ISP is bandwidth-intensive, and on a full device (display + Wi-Fi +
+Home Assistant API, not the vendor's minimal single-purpose demo) the ISP,
+camera, and MIPI-DSI display all compete for the same PSRAM bus. At
+1920x1080/30fps this can overflow the ISP's internal FIFO
+(`ISP: fifo overflow` in the log), which floods the log fast enough to trip
+the watchdog and reboot the device. If you hit this:
+
+- Request `RAW8`/`RAW10` instead (bypasses the ISP color-conversion step
+  entirely; do any RGB conversion downstream) - this is the most reliable
+  fix, or
+- Drop to OV02C10's smaller `1288x728` (`data_lanes: 1`) mode, which cuts the
+  pixel count (and therefore ISP/PSRAM bandwidth) to less than half of
+  1920x1080. Note OV02C10 only ships 30fps register tables in this
+  component, so framerate itself isn't independently reducible for this
+  sensor - only resolution is.
+
 ## Attribution
 
 This component is original code written for espcontrol, built on top of the

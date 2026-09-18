@@ -144,7 +144,13 @@ class MipiCsiCamera final : public camera::Camera {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::HARDWARE; }
+  /// Runs after other I2C peripherals on the shared SCCB/i2c bus (touchscreens, etc, which
+  /// default to setup_priority::DATA) have finished their own setup(). This component performs a
+  /// large one-shot SCCB register burst while configuring the sensor's mode and then starts a
+  /// background task that keeps using the bus; sharing the bus with something that is still in
+  /// the middle of its own timing-sensitive setup sequence (e.g. a touch controller's firmware
+  /// upload) has been observed to corrupt that peripheral's I2C transactions.
+  float get_setup_priority() const override { return setup_priority::PROCESSOR; }
 
   /* ---- camera::Camera ---- */
   void add_listener(camera::CameraListener *listener) override { this->listeners_.push_back(listener); }
