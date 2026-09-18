@@ -333,3 +333,65 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   succeeded. Scratch test directory removed afterward. Reported back to
   the user to set `init_ldo: false` in their real device config (since it
   already declares `esp_ldo:` for the display) and reflash/retest.
+
+- **ISP FIFO overflow at 1920x1080/30fps RGB565 (WDT panic)**: after
+  `init_ldo: false` unblocked setup, the user's next real-hardware log
+  showed dozens of `E (XXX) ISP: fifo overflow` lines followed by a
+  `Guru Meditation Error: Core 1 panic'ed (Interrupt wdt timeout on CPU1)`.
+  Compared our OV02C10/1920x1080/2-lane/30fps/RGB565 config line-for-line
+  against Espressif's own combined LCD+camera reference
+  (`JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display`'s `sdkconfig.defaults`,
+  `CONFIG_CAMERA_OV02C10_MIPI_RAW10_1920x1080_2LAN_30FPS`,
+  `CONFIG_SPIRAM_SPEED_200M`) - our settings matched exactly, ruling out a
+  config bug. Traced `ISP: fifo overflow` to
+  `esp_isp_isr_dispatcher()`/`ISP_LL_EVENT_ASYNC_FIFO_OVF` in ESP-IDF's
+  `esp_driver_isp`, which just logs on every overflow with no back-off -
+  under sustained overflow this floods the log fast enough to starve CPU1
+  until the watchdog fires. Root cause: real-time RAW-to-RGB565 ISP
+  conversion at 1920x1080/30fps is bandwidth-intensive, and unlike the
+  vendor's minimal single-purpose demo, the user's full ESPHome app has the
+  MIPI-DSI display continuously refreshing and competing for the same
+  PSRAM/system bus, pushing the pipeline over the edge. Recommended a
+  diagnostic: switch `pixel_format` to `RAW10` (skips the ISP color
+  conversion step entirely) at the same resolution/framerate. The user
+  retested and confirmed: `Setup mipi_csi_camera took 95ms`, zero
+  `ISP: fifo overflow` lines, and a stable ~3600-line log with no crash -
+  confirming the diagnosis. RAW10 (or RAW8) is now the recommended pixel
+  format for 1920x1080/30fps on this hardware; RGB565/RGB888 conversion
+  should happen downstream of capture if needed, or only be requested at
+  lower resolutions (see next entry).
+
+- **I2C bus contention corrupting the touchscreen (setup-priority fix)**:
+  the same RAW10 log that confirmed the FIFO fix also showed, right after
+  `mipi_csi_camera`'s setup log line and now for the first time, a
+  touchscreen failure: `touchscreen.gsl3680:169: Unexpected byte in
+  read_ram: got 0x0, expected 0x5a` -> `I2C Error: 6` -> `touchscreen was
+  marked as failed`. Root cause: ESPHome's default
+  `Component::get_setup_priority()` is `setup_priority::DATA` (600); our
+  camera previously used `setup_priority::HARDWARE` (800), so the camera's
+  `setup()` - a large one-shot SCCB register burst immediately followed by
+  spawning a persistent background capture task that keeps using the
+  shared I2C bus - ran *before* the touchscreen's own timing-sensitive
+  firmware-upload sequence (default priority `DATA`) even started,
+  corrupting its I2C transactions via bus contention/timing interference.
+  Fix: lowered `MipiCsiCamera::get_setup_priority()` to
+  `setup_priority::PROCESSOR` (400), below `DATA`, so the touchscreen (and
+  any other DATA-or-higher-priority I2C peripheral) finishes its own setup
+  before the camera's SCCB burst/background task begins. Verified with a
+  scratch ESP32-P4 test YAML (`i2c:` bus, `OV02C10`, `1288x728`,
+  `data_lanes: 1`, `RGB565`, `init_ldo: false`): `esphome compile`
+  succeeded. Documented the setup-order rationale in the README. Scratch
+  test directory removed afterward.
+
+- **Lower-resolution RGB565 option for reduced ISP/PSRAM load**: re-examined
+  `SUPPORTED_MODES["OV02C10"]` in `__init__.py` to find a lower-load RGB565
+  alternative to 1920x1080/30fps. Confirmed OV02C10 only ships two resolution
+  register tables in this component - `1288x728` (1 data lane only) and
+  `1920x1080` (1 or 2 data lanes) - both hard-coded at 30fps; unlike SC2336,
+  no lower-framerate OV02C10 tables are vendored, so framerate itself isn't
+  independently reducible for this sensor. Recommended `resolution: 1288x728`
+  with `data_lanes: 1` as the lower-load RGB565 option (roughly 46% the pixel
+  count of 1920x1080, reducing ISP/PSRAM bandwidth pressure while keeping
+  RGB565 output). Verified this combination compiles cleanly. Documented the
+  tradeoff and the valid resolution/lane table cross-reference in the
+  README's new "ISP throughput" section.
