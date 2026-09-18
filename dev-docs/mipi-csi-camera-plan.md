@@ -298,3 +298,38 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   Verified via a scratch ESP32-P4 test YAML with a real `i2c:` bus block
   (`sensor: OV02C10`, `1920x1080`, `data_lanes: 2`): `esphome compile`
   succeeded. Scratch test directory removed afterward.
+- 2026-09-19 (later): User's next log capture (with the SCCB frequency fix
+  in place) showed the SCCB fix worked completely — the I2C bus scan now
+  finds the sensor at `0x36` and the SCCB device registers successfully —
+  but a new, later failure appeared: `csi_video: csi_video_init(414):
+  failed to init LDO`, then `esp_video: video->ops->init=102`, and our own
+  `open("/dev/video0")` fails with `errno 22` (`EINVAL`) since the video
+  device node itself was never created (the LDO failure happens earlier in
+  `esp_video_init()`, before the character device is registered). The
+  user's device already logs `esp_ldo: Acquired LDO channel 3 with voltage
+  2500mV` at boot (their `esp_ldo:` component, used for the MIPI-DSI
+  display) followed later by our camera's own attempt hitting
+  `ldo: esp_ldo_acquire_channel(109): can't acquire the channel, already in
+  use by others or not adjustable`. Root cause: on the ESP32-P4, the
+  MIPI-CSI receiver PHY and the MIPI-DSI display PHY share the same
+  internal LDO regulator channel (channel 3, 2.5V) — confirmed by reading
+  `esp_video_csi_device.c` from `espressif/esp-video-components` on GitHub,
+  which hardcodes `CSI_LDO_UNIT_ID = 3`. IDF's `esp_ldo_acquire_channel()`
+  (`components/esp_hw_support/ldo/esp_ldo_regulator.c` in `espressif/esp-idf`)
+  only allows a second acquire of an already-in-use channel when neither
+  side requests "adjustable" mode; ESPHome's `esp_ldo:` component acquires
+  its channel as adjustable, so any second acquirer (our camera component)
+  is unconditionally rejected. Espressif anticipated exactly this
+  shared-PHY scenario: `esp_video_init_csi_config_t` has a `dont_init_ldo`
+  field (added in `esp_video` 1.4.0 specifically to let callers skip LDO
+  initialization when it's already powered elsewhere). Added a new
+  `init_ldo` (default `true`) config option, wired to
+  `csi_config.dont_init_ldo = !init_ldo_`, so users whose device already
+  configures `esp_ldo:` for the display (as the JC8012P4A1C_I_W_Y "new
+  panel" device config does) can set `init_ldo: false` to reuse that
+  existing, already-powered channel instead of conflicting with it.
+  Documented in the README's configuration table. Verified with a scratch
+  ESP32-P4 test YAML including `init_ldo: false`: `esphome compile`
+  succeeded. Scratch test directory removed afterward. Reported back to
+  the user to set `init_ldo: false` in their real device config (since it
+  already declares `esp_ldo:` for the display) and reflash/retest.

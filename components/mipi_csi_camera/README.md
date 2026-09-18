@@ -92,6 +92,7 @@ mipi_csi_camera:
 | `contrast`/`brightness`/`saturation` | no | `0` | `-2` to `2`, forwarded to the sensor if supported.               |
 | `jpeg_quality`         | no       | `0`     | `0` disables JPEG re-encoding; `6`-`63` re-encodes non-JPEG output.          |
 | `frame_buffer_count`   | no       | `2`     | Number of V4L2 capture buffers (2-3).                                       |
+| `init_ldo`             | no       | `true`  | Whether this component should power the shared MIPI PHY LDO regulator (channel 3, 2.5V on the ESP32-P4). Set to `false` if an `esp_ldo:` component elsewhere in your config (typically for the MIPI-DSI display) already powers that same channel — acquiring it twice fails with `esp_ldo_acquire_channel(...): can't acquire the channel, already in use by others or not adjustable`. |
 
 Automations: `on_image` (`CameraImageData image` with `data`/`length`),
 `on_stream_start`, `on_stream_stop`.

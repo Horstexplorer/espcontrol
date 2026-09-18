@@ -131,6 +131,14 @@ class MipiCsiCamera final : public camera::Camera {
   void set_saturation(int saturation) { this->saturation_ = saturation; }
   void set_jpeg_quality(uint8_t quality) { this->jpeg_quality_ = quality; }
   void set_frame_buffer_count(uint8_t count) { this->frame_buffer_count_ = count; }
+  /// On the ESP32-P4, the MIPI-CSI receiver PHY and the MIPI-DSI display PHY
+  /// share the same internal LDO regulator channel (channel 3, 2.5V). If the
+  /// display is already configured through ESPHome's `esp_ldo:` component,
+  /// that channel is already powered and marked non-shareable/adjustable, so
+  /// this component must not try to acquire it a second time. Set to
+  /// `false` when another component (usually the display) already powers
+  /// this rail; defaults to `true` (this component powers it itself).
+  void set_init_ldo(bool init_ldo) { this->init_ldo_ = init_ldo; }
 
   /* ---- Component ---- */
   void setup() override;
@@ -178,6 +186,7 @@ class MipiCsiCamera final : public camera::Camera {
   int saturation_{0};
   uint8_t jpeg_quality_{0};
   uint8_t frame_buffer_count_{2};
+  bool init_ldo_{true};
 
   /* runtime state */
   int video_fd_{-1};
