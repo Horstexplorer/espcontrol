@@ -209,4 +209,29 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   the header-ordering fix above. Scratch test directory removed afterward.
   Updated `README.md` (OV02C10 supported-sensor note, valid resolution/lane
   table, attribution for the vendored driver).
+- 2026-09-19: User flashed the OV02C10 build and reported a *new*, different
+  failure. Their fresh log confirms real progress: `dump_config` now shows
+  `Sensor: OV02C10`, `SCCB: shared i2c bus (port 0)`, and (critically)
+  `Setup Failed: ESP_OK` — meaning `esp_video_init()` itself now succeeds
+  (the sensor is correctly detected/initialized), so the failure has moved
+  to the component's own post-init steps: `open_device_()` (`open()` +
+  `VIDIOC_QUERYCAP`), `configure_format_()` (`VIDIOC_S_FMT` + optional
+  flip/mirror controls), or `allocate_buffers_()` (`VIDIOC_REQBUFS` +
+  per-buffer `VIDIOC_QUERYBUF`/`mmap()`/`VIDIOC_QBUF`). None of these three
+  functions' `ESP_LOGE` failure messages appeared anywhere in the user's
+  1270-line log, even though the log clearly captures other components'
+  real-time setup() output at the same log level — so a fix landed to
+  produce genuinely diagnostic output on the next attempt rather than
+  theorize further from an already-exhausted log: every `open()`/`ioctl()`
+  failure branch in these three functions now logs `strerror(errno)` +
+  the numeric `errno` alongside the existing message, and a new
+  `setup_failure_reason_` string field is set whenever this code path
+  causes `mark_failed()`, so `dump_config()` no longer misleadingly prints
+  the stale `ESP_OK` `init_error_` for this specific failure path (a
+  secondary, pre-existing diagnostic bug fixed alongside it). Re-verified
+  end-to-end with a scratch ESP32-P4 test YAML (`sensor: OV02C10`,
+  `1920x1080`, `data_lanes: 2`, `pixel_format: RGB565`): `esphome config`
+  and a full `esphome compile` both succeeded. Root cause of the actual
+  buffer/format failure is still unknown — waiting on the user's next log
+  capture with these diagnostics in place.
 

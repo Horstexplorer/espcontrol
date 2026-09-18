@@ -186,6 +186,7 @@ class MipiCsiCamera final : public camera::Camera {
   bool streaming_{false};
   ppa_client_handle_t ppa_handle_{nullptr};
   esp_err_t init_error_{0 /* ESP_OK */};
+  const char *setup_failure_reason_{nullptr};
 
   std::shared_ptr<MipiCsiCameraImage> current_image_;
   std::atomic<uint8_t> single_requesters_{0};

@@ -4,6 +4,7 @@
 
 #include <cinttypes>
 #include <cstring>
+#include <cerrno>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -135,6 +136,7 @@ void MipiCsiCamera::setup() {
   }
 
   if (!this->open_device_() || !this->configure_format_() || !this->allocate_buffers_()) {
+    this->setup_failure_reason_ = "opening/configuring the video device failed (see error above)";
     this->mark_failed();
     return;
   }
@@ -158,13 +160,13 @@ void MipiCsiCamera::setup() {
 bool MipiCsiCamera::open_device_() {
   this->video_fd_ = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
   if (this->video_fd_ < 0) {
-    ESP_LOGE(TAG, "Failed to open %s", ESP_VIDEO_MIPI_CSI_DEVICE_NAME);
+    ESP_LOGE(TAG, "Failed to open %s: %s (errno %d)", ESP_VIDEO_MIPI_CSI_DEVICE_NAME, strerror(errno), errno);
     return false;
   }
 
   struct v4l2_capability capability{};
   if (ioctl(this->video_fd_, VIDIOC_QUERYCAP, &capability) != 0) {
-    ESP_LOGE(TAG, "Failed to query camera capabilities");
+    ESP_LOGE(TAG, "Failed to query camera capabilities: %s (errno %d)", strerror(errno), errno);
     return false;
   }
   ESP_LOGD(TAG, "Camera driver: %s, card: %s", capability.driver, capability.card);
@@ -179,8 +181,9 @@ bool MipiCsiCamera::configure_format_() {
   format.fmt.pix.pixelformat = pixel_format_to_v4l2(this->pixel_format_);
 
   if (ioctl(this->video_fd_, VIDIOC_S_FMT, &format) != 0) {
-    ESP_LOGE(TAG, "Failed to set %ux%u %s format; check that this mode is supported by the %s sensor",
-             this->width_, this->height_, pixel_format_to_str(this->pixel_format_),
+    ESP_LOGE(TAG,
+             "Failed to set %ux%u %s format: %s (errno %d); check that this mode is supported by the %s sensor",
+             this->width_, this->height_, pixel_format_to_str(this->pixel_format_), strerror(errno), errno,
              sensor_model_to_str(this->sensor_model_));
     return false;
   }
@@ -218,7 +221,8 @@ bool MipiCsiCamera::allocate_buffers_() {
   req.memory = V4L2_MEMORY_MMAP;
 
   if (ioctl(this->video_fd_, VIDIOC_REQBUFS, &req) != 0) {
-    ESP_LOGE(TAG, "Failed to request %u capture buffers", this->frame_buffer_count_);
+    ESP_LOGE(TAG, "Failed to request %u capture buffers: %s (errno %d)", this->frame_buffer_count_, strerror(errno),
+             errno);
     return false;
   }
 
@@ -230,21 +234,21 @@ bool MipiCsiCamera::allocate_buffers_() {
     buf.index = i;
 
     if (ioctl(this->video_fd_, VIDIOC_QUERYBUF, &buf) != 0) {
-      ESP_LOGE(TAG, "Failed to query capture buffer %" PRIu32, i);
+      ESP_LOGE(TAG, "Failed to query capture buffer %" PRIu32 ": %s (errno %d)", i, strerror(errno), errno);
       return false;
     }
 
     auto *mapped = static_cast<uint8_t *>(
         mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, this->video_fd_, buf.m.offset));
     if (mapped == MAP_FAILED) {  // NOLINT(performance-no-int-to-ptr)
-      ESP_LOGE(TAG, "Failed to mmap capture buffer %" PRIu32, i);
+      ESP_LOGE(TAG, "Failed to mmap capture buffer %" PRIu32 ": %s (errno %d)", i, strerror(errno), errno);
       return false;
     }
     this->capture_buffers_[i] = mapped;
     this->capture_buffer_size_ = buf.length;
 
     if (ioctl(this->video_fd_, VIDIOC_QBUF, &buf) != 0) {
-      ESP_LOGE(TAG, "Failed to queue capture buffer %" PRIu32, i);
+      ESP_LOGE(TAG, "Failed to queue capture buffer %" PRIu32 ": %s (errno %d)", i, strerror(errno), errno);
       return false;
     }
   }
@@ -257,7 +261,7 @@ void MipiCsiCamera::start_capture_() {
     return;
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (ioctl(this->video_fd_, VIDIOC_STREAMON, &type) != 0) {
-    ESP_LOGE(TAG, "Failed to start MIPI-CSI capture stream");
+    ESP_LOGE(TAG, "Failed to start MIPI-CSI capture stream: %s (errno %d)", strerror(errno), errno);
     return;
   }
   this->streaming_ = true;
@@ -458,7 +462,11 @@ void MipiCsiCamera::dump_config() {
                 static_cast<i2c::InternalI2CBus *>(this->external_i2c_bus_)->get_port());
 
   if (this->is_failed()) {
-    ESP_LOGE(TAG, "  Setup Failed: %s", esp_err_to_name(this->init_error_));
+    if (this->setup_failure_reason_ != nullptr) {
+      ESP_LOGE(TAG, "  Setup Failed: %s", this->setup_failure_reason_);
+    } else {
+      ESP_LOGE(TAG, "  Setup Failed: %s", esp_err_to_name(this->init_error_));
+    }
     return;
   }
 
