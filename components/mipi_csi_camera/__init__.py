@@ -3,12 +3,14 @@ from typing import Any
 
 from esphome import automation, pins
 import esphome.codegen as cg
+from esphome.components import i2c
 from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
 from esphome.components.psram import DOMAIN as psram_domain
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BRIGHTNESS,
     CONF_CONTRAST,
+    CONF_I2C_ID,
     CONF_ID,
     CONF_RESET_PIN,
     CONF_RESOLUTION,
@@ -159,6 +161,24 @@ def _validate_mode(config: ConfigType) -> ConfigType:
     return config
 
 
+def _validate_sccb_bus(config: ConfigType) -> ConfigType:
+    has_i2c_id = CONF_I2C_ID in config
+    has_sda = CONF_SCCB_SDA_PIN in config
+    has_scl = CONF_SCCB_SCL_PIN in config
+
+    if has_i2c_id and (has_sda or has_scl):
+        raise cv.Invalid(
+            f"'{CONF_I2C_ID}' shares an existing i2c bus for SCCB and cannot be combined with "
+            f"'{CONF_SCCB_SDA_PIN}'/'{CONF_SCCB_SCL_PIN}' (dedicated SCCB bus mode)"
+        )
+    if not has_i2c_id and not (has_sda and has_scl):
+        raise cv.Invalid(
+            f"mipi_csi_camera requires either '{CONF_I2C_ID}' (to share an existing i2c: bus) or "
+            f"both '{CONF_SCCB_SDA_PIN}' and '{CONF_SCCB_SCL_PIN}' (dedicated SCCB bus)"
+        )
+    return config
+
+
 def validate_jpeg_quality(config: ConfigType) -> ConfigType:
     quality = config.get(CONF_JPEG_QUALITY)
     if quality != 0 and (quality < 6 or quality > 63):
@@ -183,11 +203,15 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_XCLK_FREQUENCY, default="24MHz"): cv.All(
                 cv.frequency, cv.float_range(min=6e6, max=27e6)
             ),
-            # The SCCB (camera control) bus is a dedicated I2C-like link that
-            # esp_video initializes and owns directly; it is intentionally
-            # separate from ESPHome's `i2c:` component/bus.
-            cv.Required(CONF_SCCB_SDA_PIN): pins.internal_gpio_output_pin_number,
-            cv.Required(CONF_SCCB_SCL_PIN): pins.internal_gpio_output_pin_number,
+            # The SCCB (camera control) bus is an I2C-like link. Some boards
+            # wire it to dedicated pins that esp_video can own directly;
+            # others (e.g. the JC8012P4A1C_I_W_Y camera FPC) hard-wire it to
+            # the same pins as an existing shared `i2c:` bus (touchscreen/
+            # RTC/audio codec), in which case that bus must be reused via
+            # `i2c_id` instead of starting a second, conflicting I2C driver.
+            cv.Optional(CONF_I2C_ID): cv.use_id(i2c.I2CBus),
+            cv.Optional(CONF_SCCB_SDA_PIN): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_SCCB_SCL_PIN): pins.internal_gpio_output_pin_number,
             cv.Optional(CONF_SCCB_PORT, default=1): cv.int_range(min=0, max=1),
             cv.Optional(CONF_SCCB_FREQUENCY, default="100kHz"): cv.All(
                 cv.frequency, cv.float_range(min=1e3, max=400e3)
@@ -228,6 +252,7 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_mode,
     validate_jpeg_quality,
+    _validate_sccb_bus,
 )
 
 
@@ -272,14 +297,18 @@ async def to_code(config: ConfigType) -> None:
     await setup_entity(var, config, "camera")
     await cg.register_component(var, config)
 
-    cg.add(
-        var.set_sccb_bus(
-            config[CONF_SCCB_PORT],
-            config[CONF_SCCB_SDA_PIN],
-            config[CONF_SCCB_SCL_PIN],
-            int(config[CONF_SCCB_FREQUENCY]),
+    if CONF_I2C_ID in config:
+        i2c_bus = await cg.get_variable(config[CONF_I2C_ID])
+        cg.add(var.set_i2c_bus(i2c_bus))
+    else:
+        cg.add(
+            var.set_sccb_bus(
+                config[CONF_SCCB_PORT],
+                config[CONF_SCCB_SDA_PIN],
+                config[CONF_SCCB_SCL_PIN],
+                int(config[CONF_SCCB_FREQUENCY]),
+            )
         )
-    )
 
     cg.add(var.set_sensor_model(config[CONF_SENSOR]))
     width, height = config[CONF_RESOLUTION]

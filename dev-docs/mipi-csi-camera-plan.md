@@ -108,4 +108,23 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   rotator constraint); other formats skip rotation with a logged warning.
   Remaining work: enable this on an actual device YAML once a camera-equipped
   JC8012P4A1C_I_W_Y unit is available for physical testing.
+- 2026-09-18: Extracted text from `JC8012P4A1C_I_W_Y_New_Panel/JC8012P4A1.pdf`
+  (schematic) to determine the real camera FPC pinout, since the first device
+  YAML the user tried hit real pin conflicts. Findings: the camera FPC's SCCB
+  lines (`ES_I2C_SDA`/`ES_I2C_SCL`) are hard-wired to the exact same
+  GPIO7/GPIO8 net as the panel's existing shared `i2c:` bus (used for the
+  touchscreen, and RTC/audio codec on other revisions) — not separate pins.
+  `GPIO27` is already the LCD's `reset_pin`. The camera FPC's `CSI_IO0`/
+  `CSI_IO1` lines are only pulled up to VDDA via 10k resistors with no GPIO
+  connection, so this hardware has no software-controlled camera reset/
+  power-down pin. This invalidated the original "esp_video owns a dedicated
+  SCCB I2C driver" design for this specific board (two independent I2C
+  drivers can't both claim GPIO7/GPIO8). Reworked the component to support
+  both modes: a new `i2c_id` option shares an already-initialized ESPHome
+  `i2c:` bus (via `i2c_master_get_bus_handle()` on the bus's port, exposed
+  through `i2c::InternalI2CBus::get_port()`) for boards like this one, while
+  the original `sccb_sda_pin`/`sccb_scl_pin` dedicated-bus mode remains for
+  boards with independent camera I2C pins. Re-validated end-to-end with
+  `esphome config` + a full `esphome compile` using the shared-bus mode
+  against `i2c: bus_a` on GPIO7/GPIO8 — both passed.
 

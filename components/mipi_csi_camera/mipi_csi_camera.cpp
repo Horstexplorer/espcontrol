@@ -14,6 +14,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
+#include "driver/i2c_master.h"
 #include "esp_video_init.h"
 #include "esp_video_device.h"
 #include "linux/videodev2.h"
@@ -98,18 +99,35 @@ size_t MipiCsiCamera::bytes_per_pixel_() const {
 /* ---------------- setup ---------------- */
 
 void MipiCsiCamera::setup() {
+  esp_video_init_sccb_config_t sccb_config{};
+
+  if (this->external_i2c_bus_ != nullptr) {
+    // Share an already-initialized ESPHome `i2c:` bus. This is required
+    // whenever the camera FPC's SCCB SDA/SCL lines are hard-wired to the
+    // same physical pins as another shared I2C bus (e.g. touchscreen/RTC on
+    // the JC8012P4A1C_I_W_Y panel) -- a second, independent I2C driver
+    // instance can't also claim those pins.
+    auto *internal_bus = static_cast<i2c::InternalI2CBus *>(this->external_i2c_bus_);
+    i2c_master_bus_handle_t bus_handle{};
+    esp_err_t err = i2c_master_get_bus_handle(static_cast<i2c_port_num_t>(internal_bus->get_port()), &bus_handle);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to get i2c bus handle for shared SCCB bus: %s", esp_err_to_name(err));
+      this->init_error_ = err;
+      this->mark_failed();
+      return;
+    }
+    sccb_config.init_sccb = false;
+    sccb_config.i2c_handle = bus_handle;
+  } else {
+    sccb_config.init_sccb = true;
+    sccb_config.i2c_config.port = this->sccb_port_;
+    sccb_config.i2c_config.scl_pin = static_cast<gpio_num_t>(this->sccb_scl_pin_);
+    sccb_config.i2c_config.sda_pin = static_cast<gpio_num_t>(this->sccb_sda_pin_);
+    sccb_config.freq = this->sccb_frequency_;
+  }
+
   esp_video_init_csi_config_t csi_config[] = {{
-      .sccb_config =
-          {
-              .init_sccb = true,
-              .i2c_config =
-                  {
-                      .port = this->sccb_port_,
-                      .scl_pin = static_cast<gpio_num_t>(this->sccb_scl_pin_),
-                      .sda_pin = static_cast<gpio_num_t>(this->sccb_sda_pin_),
-                  },
-              .freq = this->sccb_frequency_,
-          },
+      .sccb_config = sccb_config,
       .reset_pin = static_cast<gpio_num_t>(this->reset_pin_),
       .pwdn_pin = static_cast<gpio_num_t>(this->power_down_pin_),
   }};
@@ -437,14 +455,20 @@ void MipiCsiCamera::dump_config() {
                 "  Pixel Format: %s\n"
                 "  Data Lanes: %u\n"
                 "  Rotation: %u\n"
-                "  SCCB: port %u, SDA:%d SCL:%d, %" PRIu32 " Hz\n"
                 "  Reset Pin: %d\n"
                 "  Power Down Pin: %d\n"
                 "  Frame Buffer Count: %u",
                 sensor_model_to_str(this->sensor_model_), this->width_, this->height_, this->framerate_,
-                pixel_format_to_str(this->pixel_format_), this->data_lanes_, this->rotation_, this->sccb_port_,
-                this->sccb_sda_pin_, this->sccb_scl_pin_, this->sccb_frequency_, this->reset_pin_,
+                pixel_format_to_str(this->pixel_format_), this->data_lanes_, this->rotation_, this->reset_pin_,
                 this->power_down_pin_, this->frame_buffer_count_);
+
+  if (this->external_i2c_bus_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  SCCB: shared i2c bus (port %d)",
+                  static_cast<i2c::InternalI2CBus *>(this->external_i2c_bus_)->get_port());
+  } else {
+    ESP_LOGCONFIG(TAG, "  SCCB: dedicated bus, port %u, SDA:%d SCL:%d, %" PRIu32 " Hz", this->sccb_port_,
+                  this->sccb_sda_pin_, this->sccb_scl_pin_, this->sccb_frequency_);
+  }
 
   if (this->is_failed()) {
     ESP_LOGE(TAG, "  Setup Failed: %s", esp_err_to_name(this->init_error_));
