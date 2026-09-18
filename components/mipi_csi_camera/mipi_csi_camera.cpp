@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -296,17 +297,72 @@ void MipiCsiCamera::stop_capture_() {
   this->streaming_ = false;
 }
 
+void MipiCsiCamera::on_shutdown() {
+  // A software reset (OTA update, safe-mode reboot, etc) does not power-cycle external
+  // peripherals: the CSI PHY, sensor, and SCCB/LDO claims all survive it untouched unless we
+  // explicitly tear them down here. Leaving the sensor mid-stream has been observed to disturb
+  // the shared I2C bus right at the start of the *next* boot - before this component's own
+  // setup() even runs again - corrupting other peripherals (e.g. a touchscreen) that are in the
+  // middle of their own timing-sensitive setup at that point.
+  if (this->video_fd_ < 0)
+    return;  // setup() never completed; nothing to tear down.
+
+  if (this->capture_task_handle_ != nullptr) {
+    this->capture_task_stop_requested_.store(true, std::memory_order_relaxed);
+    this->stop_capture_();  // STREAMOFF unblocks a pending VIDIOC_DQBUF in the capture task.
+
+    // Wait for the task to notice, requeue/clean up, and self-delete (it always does, see
+    // capture_task()); cap the wait so a stuck driver can't hang shutdown indefinitely.
+    for (int waited_ms = 0; waited_ms < 200 && !this->capture_task_stopped_.load(std::memory_order_relaxed);
+         waited_ms += 5) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    this->capture_task_handle_ = nullptr;
+  } else {
+    this->stop_capture_();
+  }
+
+  if (this->frame_queue_ != nullptr) {
+    vQueueDelete(this->frame_queue_);
+    this->frame_queue_ = nullptr;
+  }
+
+  if (this->ppa_handle_ != nullptr) {
+    ppa_unregister_client(this->ppa_handle_);
+    this->ppa_handle_ = nullptr;
+  }
+
+  for (auto *buffer : this->capture_buffers_) {
+    if (buffer != nullptr)
+      munmap(buffer, this->capture_buffer_size_);
+  }
+  this->capture_buffers_.clear();
+
+  close(this->video_fd_);
+  this->video_fd_ = -1;
+
+  // Releases the CSI PHY, stops/resets the sensor over SCCB, and (unless dont_init_ldo was set,
+  // i.e. init_ldo_ == false) releases the shared MIPI PHY LDO channel - so the next boot starts
+  // from a clean slate instead of inheriting whatever state the sensor was left streaming in.
+  esp_err_t err = esp_video_deinit();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_video_deinit failed during shutdown: %s", esp_err_to_name(err));
+  }
+}
+
 /* ---------------- capture task ---------------- */
 
 void MipiCsiCamera::capture_task(void *param) {
   auto *self = static_cast<MipiCsiCamera *>(param);
 
-  while (true) {
+  while (!self->capture_task_stop_requested_.load(std::memory_order_relaxed)) {
     struct v4l2_buffer buf{};
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf.memory = V4L2_MEMORY_MMAP;
 
     if (ioctl(self->video_fd_, VIDIOC_DQBUF, &buf) != 0) {
+      if (self->capture_task_stop_requested_.load(std::memory_order_relaxed))
+        break;
       ESP_LOGW(TAG, "Failed to dequeue camera frame");
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
@@ -326,6 +382,9 @@ void MipiCsiCamera::capture_task(void *param) {
     }
     xQueueSend(self->frame_queue_, &index, 0);
   }
+
+  self->capture_task_stopped_.store(true, std::memory_order_relaxed);
+  vTaskDelete(nullptr);
 }
 
 /* ---------------- rotation ---------------- */

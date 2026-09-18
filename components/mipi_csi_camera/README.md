@@ -143,6 +143,15 @@ your YAML (equal-priority components set up in declaration order) or, in
 rare cases where it uses a lower/equal priority itself, raising its priority
 explicitly with `component.set_priority` / device-specific config.
 
+This component also stops streaming and releases the CSI PHY/sensor/SCCB/LDO
+claims on shutdown (`on_shutdown()`, called before every reboot - OTA
+updates, safe-mode reboots, etc). This matters because a software reset
+doesn't power-cycle external peripherals: without an explicit teardown, the
+sensor would still be mid-stream when the *next* boot starts, and that
+leftover activity on the shared I2C bus was observed to corrupt other
+peripherals' (e.g. a touchscreen's) own boot-time setup - even before this
+component's own `setup()` ran again on that new boot.
+
 ## ISP throughput (RGB565/RGB888 at high resolution)
 
 Converting RAW Bayer data to RGB565/RGB888 in real time via the ESP32-P4's

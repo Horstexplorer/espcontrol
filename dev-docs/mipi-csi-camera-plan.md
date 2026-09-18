@@ -395,3 +395,39 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   RGB565 output). Verified this combination compiles cleanly. Documented the
   tradeoff and the valid resolution/lane table cross-reference in the
   README's new "ISP throughput" section.
+
+  - **Touchscreen still corrupted with 1288x728/RGB565, despite the
+    setup-priority fix (cross-boot residual state, not within-boot ordering)**:
+    the user tested `resolution: 1288x728`, `data_lanes: 1`, `RGB565` with the
+    setup-priority fix applied and still saw the touchscreen fail
+    (`gsl3680:169` "Unexpected byte in read_ram" -> `I2C Error: 6` -> marked
+    failed) - but this time the log showed the touchscreen's `setup()`
+    starting and failing *before* `mipi_csi_camera`'s own `setup()` had run at
+    all on that boot (consistent with the priority fix actually working this
+    time), which disproved the "within-boot ordering" theory as the sole
+    cause. Re-examined the boot: `rst:0xc (SW_CPU_RESET)` showed this was a
+    *software* reset (from the OTA update that immediately preceded it), not a
+    power-on reset - and a software reset does not power-cycle external
+    peripherals. The camera component had no `on_shutdown()`/teardown at all:
+    its background capture task ran an unconditional infinite loop, and
+    `setup()` never got paired with any code path that stopped streaming,
+    closed the video device, or called `esp_video_deinit()`. This meant every
+    OTA update (or any other soft reboot) left the CSI sensor mid-stream and
+    the SCCB/LDO claims held, so the *next* boot's I2C bus started out
+    disturbed by still-active MIPI-CSI hardware right as the touchscreen began
+    its own timing-sensitive firmware-upload sequence - before the camera's
+    own `setup()` even ran again on the new boot. Fix: added
+    `MipiCsiCamera::on_shutdown()` (called by ESPHome before every reboot) that
+    (1) sets a stop flag and calls `VIDIOC_STREAMOFF` to unblock the capture
+    task's pending `VIDIOC_DQBUF` call, (2) waits (bounded to 200ms) for the
+    capture task to notice, requeue, and self-delete via `vTaskDelete(nullptr)`
+    (the task loop itself was changed from `while (true)` to check the stop
+    flag), (3) deletes the frame queue, (4) unregisters the PPA client, (5)
+    `munmap()`s and clears all capture buffers, (6) closes the video fd, and
+    (7) calls `esp_video_deinit()` to release the CSI PHY, reset/power down
+    the sensor over SCCB, and (unless `init_ldo: false`) release the shared
+    MIPI PHY LDO channel - leaving a clean slate for the next boot. Verified
+    with a scratch ESP32-P4 test YAML (`OV02C10`, `1288x728`, `data_lanes: 1`,
+    `RGB565`, `init_ldo: false`): `esphome compile` succeeded. Documented the
+    shutdown behavior and its rationale in the README. Scratch test directory
+    removed afterward.
