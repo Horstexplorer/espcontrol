@@ -1,0 +1,111 @@
+# MIPI-CSI Camera Component — Plan & Progress
+
+## Goal
+
+Add a new ESPHome external component, `components/mipi_csi_camera`, that drives
+the MIPI-CSI camera fitted to the newest **JC8012P4A1C_I_W_Y** panel revision
+(ESP32-P4). The component must implement the standard ESPHome
+`esphome::camera::Camera` interface (see `components_esphome/camera`) so that:
+
+- Other espcontrol components can pull frames from it (listener interface).
+- Home Assistant / the ESPHome API can request snapshots or a stream, exactly
+  like the existing `esp32_camera` component does for OV2640-style sensors.
+
+Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
+(lane count / bit rate), and image (pixel) format.
+
+## Hardware / vendor reference facts
+
+- Example project: `JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display` — Espressif
+  `esp_video` (V4L2-style) sample for the ESP32-P4-Function-EV-Board.
+- Camera sensor: **SC2336** (2MP), MIPI-CSI, connected over SCCB (I2C-like).
+  `OV5647` is also supported by the same BSP/driver stack.
+- Driver stack used by the vendor examples (not something we should
+  re-implement from scratch):
+  - `esp_video` (managed IDF component, `espressif/esp_video ~2.0`) — provides
+    `esp_video_init()` plus a Linux-`videodev2.h`-compatible V4L2 ioctl API
+    (`open`, `VIDIOC_S_FMT`, `VIDIOC_REQBUFS`, `VIDIOC_QBUF`/`DQBUF`,
+    `VIDIOC_STREAMON`/`OFF`, `VIDIOC_S_EXT_CTRLS` for flip).
+  - `esp_cam_sensor` — sensor drivers (`sc2336`, `ov5647`, …) with baked-in
+    register sequences per resolution/format/framerate combination
+    (`JC8012P4A1C_I_W_Y_New_Panel/common_components/esp_cam_sensor/sensors/sc2336`).
+    Each mode entry pins width, height, fps and MIPI lane count/bitrate
+    together — you select a *mode*, not independent axes.
+  - MIPI-CSI PHY + ISP bring-up is handled internally by `esp_video`; we do not
+    talk to `esp_lcd_mipi_dsi`-style low level registers ourselves (that API is
+    for the *display*, not the camera).
+- `app_video.c`/`app_video.h` in the same example show the full frame
+  lifecycle: open device → `VIDIOC_S_FMT` → `VIDIOC_REQBUFS`/`QBUF` (mmap or
+  user pointers) → `VIDIOC_STREAMON` → task loop of `DQBUF` → consume → `QBUF`.
+- Rotation is done in hardware via the ESP32-P4 **PPA** (Pixel Processing
+  Accelerator, `driver/ppa.h`, `ppa_do_scale_rotate_mirror`) in
+  `video_lcd_display/main/main.c`.
+
+## Design decisions
+
+1. Depend on Espressif's `esp_video` + `esp_cam_sensor` managed components
+   (same approach `esp32_camera` takes with `espressif/esp32-camera`) instead
+   of re-deriving MIPI-CSI PHY/ISP init — this matches vendor guidance and
+   avoids duplicating hundreds of sensor register tables.
+2. Implement `mipi_csi_camera::MipiCsiCamera` deriving from
+   `esphome::camera::Camera`, so it slots into the existing camera listener /
+   image-reader / API plumbing with no changes needed elsewhere.
+3. Support `SC2336` and `OV5647` sensors (both already vendored as
+   `esp_cam_sensor` drivers and both explicitly called out as supported by the
+   ESP32-P4-Function-EV-Board BSP that the JC8012P4A1C_I_W_Y New Panel reuses).
+4. Expose:
+   - `resolution` (`WIDTHxHEIGHT`), `framerate`, `pixel_format` (validated
+     against each sensor's known mode table so an invalid combination fails at
+     config time, not at runtime).
+   - `data_lanes` (1 or 2) — informational/validated against the sensor's mode
+     table; the actual lane bit rate is intrinsic to the selected mode (as
+     with the vendor examples) and is logged in `dump_config()`.
+   - `rotation` (0/90/180/270) applied per-frame with the PPA driver.
+   - Standard camera plumbing: I2C/SCCB bus, reset/power-down pins, frame
+     buffer count, JPEG quality (for `esp32_camera`-style consumers that expect
+     JPEG), horizontal/vertical flip (mapped to V4L2 `V4L2_CID_HFLIP/VFLIP`).
+5. Frame capture runs on a dedicated FreeRTOS task (mirrors `app_video.c`
+   pattern and `esp32_camera`'s producer/consumer queue design) so `loop()`
+   just drains completed frames and notifies listeners.
+6. Guard the whole component behind `USE_ESP32_VARIANT_ESP32P4` (MIPI-CSI only
+   exists on P4), same convention as `components/mipi_dsi`.
+
+## Task breakdown
+
+1. [x] Explore reference material (BSP headers, vendor example app, existing
+       `camera`/`esp32_camera` ESPHome components, `mipi_dsi`/`mipi_rgb`
+       conventions used in this repo).
+2. [x] Write this plan document.
+3. [x] Implement `components/mipi_csi_camera/__init__.py` (config schema,
+       codegen, IDF component + sdkconfig wiring).
+4. [x] Implement `mipi_csi_camera.h` / `mipi_csi_camera.cpp` (V4L2 lifecycle,
+       Camera interface, PPA rotation, listener notification, image reader).
+5. [x] Add `README.md` (usage + supported sensors + config reference).
+6. [x] Validate: ran `esphome config` (full schema/codegen pass, valid) and a
+       full `esphome compile` against a throwaway ESP32-P4 test YAML in this
+       worktree — the component builds and links successfully end-to-end
+       against the real `espressif/esp_video`/`espressif/esp_cam_sensor` IDF
+       components. No physical device test was possible from this
+       environment — that still needs to happen on real JC8012P4A1C_I_W_Y
+       hardware with a camera module attached.
+7. [ ] Update any relevant docs (e.g. `dev-docs/devices-and-builds.md` or a
+       device README) only if directly tied to enabling this on a real device
+       config — not done yet, no device YAML references this component.
+
+## Progress log
+
+- 2026-09-18: Investigated hardware/software stack, confirmed SC2336/OV5647 +
+  `esp_video`/`esp_cam_sensor` as the correct dependency, created working
+  branch `add-mipi-csi-camera-component` in a dedicated worktree, wrote this
+  plan.
+- 2026-09-18: Implemented `components/mipi_csi_camera` (Python config schema +
+  C++ `MipiCsiCamera` driver), wrote `README.md`. Verified with a scratch
+  ESP32-P4 test YAML: `esphome config` passed cleanly, and `esphome compile`
+  succeeded (found and fixed one real issue along the way — `esp_video ~2.0`
+  requires `esp_cam_sensor ~2.0`, not `~1.1` as first assumed from the older
+  vendored example). Firmware built successfully (Flash 25.3%, RAM 12.7%).
+  Rotation is currently limited to RGB565/RGB888 output (PPA hardware
+  rotator constraint); other formats skip rotation with a logged warning.
+  Remaining work: enable this on an actual device YAML once a camera-equipped
+  JC8012P4A1C_I_W_Y unit is available for physical testing.
+
