@@ -274,3 +274,27 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   `.text.__esp_cam_sensor_detect_fn_ov02c10_detect_ESP_CAM_SENSOR_MIPI_CSI`
   present in the final image (previously would have been dropped).
   Scratch test directory removed afterward.
+- 2026-09-19: User's next log capture (with the linker fix in place) showed
+  real forward progress: the MIPI-CSI detect loop now runs, but fails at
+  `esp_video_init: failed to initialize SCCB`. Fetching the full raw log
+  (not just the earlier keyword-filtered grep) revealed the two preceding
+  native ESP-IDF lines that had been missed before:
+  `i2c.master: i2c_master_bus_add_device(1182): invalid scl frequency` and
+  `sccb_i2c: sccb_new_i2c_io(54): failed to add device`. Root cause: our own
+  `setup()` builds `esp_video_init_sccb_config_t sccb_config{}` with
+  aggregate-initialization (zero-fills every field) and never sets
+  `sccb_config.freq`, so the SCCB "device" that `esp_video_init()` registers
+  on the shared I2C bus was requesting a 0 Hz clock — which the newer IDF
+  `i2c_master_bus_add_device()` correctly rejects as invalid. This was a
+  plain omission in our own code, not a bus/address conflict with the
+  GSL3680 touchscreen (checked `devices/guition-esp32-p4-jc8012p4a1-v3/device/device.yaml`'s
+  `i2c:`/`touchscreen:` block — no `0x36` conflict was ever present; the
+  main I2C bus's own 400kHz `frequency:` setting is unrelated, since SCCB
+  register access is added as a *separate* device on the same bus with its
+  own clock speed). Fixed by explicitly setting `sccb_config.freq = 100000`
+  (100kHz), matching every reference board example in the vendor tree
+  (`xiaozhi-esp32-main/main/boards/**/*.cc`, all of which use 100kHz or
+  400kHz SCCB clocks — 100kHz is the more universally supported default).
+  Verified via a scratch ESP32-P4 test YAML with a real `i2c:` bus block
+  (`sensor: OV02C10`, `1920x1080`, `data_lanes: 2`): `esphome compile`
+  succeeded. Scratch test directory removed afterward.
