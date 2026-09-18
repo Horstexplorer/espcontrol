@@ -127,4 +127,34 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   boards with independent camera I2C pins. Re-validated end-to-end with
   `esphome config` + a full `esphome compile` using the shared-bus mode
   against `i2c: bus_a` on GPIO7/GPIO8 — both passed.
+- 2026-09-18: User pushed back on exposing dedicated-vs-shared SCCB bus
+  config at all, pointing out the CSI differential lanes (ESP32-P4 package
+  pins 42-48, `CSI_CLK_P/N`/`CSI_DATA0/1_P/N`) are fixed SerDes hardware, not
+  GPIO-matrix pins — correct, and that was never exposed as config anyway
+  (only SCCB pins were). Cross-checked
+  [`sullb/esphome-p4-csi-camera`](https://github.com/sullb/esphome-p4-csi-camera)
+  (an independent ESPHome MIPI-CSI component for the same board, targeting
+  OV02C10): its C++ hardcodes `sccb_config.init_sccb = true` on port 0,
+  SCL=GPIO8/SDA=GPIO7 — confirming SCCB/I2C really is required by
+  `esp_video` for any sensor (register-level control), but that project just
+  hardcodes it for one board rather than exposing it as YAML config. Since
+  this component targets multiple sensors/boards, SCCB does need to stay
+  configurable — but the bespoke dual-mode `sccb_sda_pin`/`sccb_scl_pin`/
+  `sccb_port`/`sccb_frequency` schema was unnecessary complexity. Simplified
+  to the standard ESPHome idiom instead: a single
+  `cv.GenerateID(CONF_I2C_ID): cv.use_id(i2c.I2CBus)` option, matching how
+  every other I2C-peripheral component is configured (auto-resolves to the
+  sole configured `i2c:` bus when there's only one). Removed the dedicated-
+  bus mode entirely from the Python schema, C++ setter/members, `setup()`/
+  `dump_config()` branching, and README. Re-validated end-to-end: recreated
+  a scratch ESP32-P4 test YAML with `i2c: bus_a` (GPIO7/GPIO8) and
+  `mipi_csi_camera: { i2c_id: bus_a, ... }`; `esphome config` passed
+  (confirmed `i2c_id` also auto-resolves correctly when omitted with a
+  single `i2c:` bus declared); `esphome compile` initially caught two real
+  bugs introduced by the simplification — a duplicate `esp_err_t err`
+  declaration in `setup()` (rename to `ppa_err`) and three `%u`/`uint32_t`
+  format-specifier mismatches in `allocate_buffers_()` logging (fixed with
+  `PRIu32`) — after fixing both, the full compile succeeded and linked
+  cleanly against the real `esp_video`/`esp_cam_sensor` IDF components
+  (Flash 5.7%, RAM 12.2%). Scratch test directory removed afterward.
 

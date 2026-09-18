@@ -103,22 +103,14 @@ class MipiCsiCameraImageReader : public camera::CameraImageReader {
 class MipiCsiCamera final : public camera::Camera {
  public:
   /* ---- configuration setters (called from generated code) ---- */
-  /// Shares an already-configured ESPHome `i2c:` bus for SCCB instead of
-  /// having `esp_video` own a dedicated I2C driver instance. Required on
-  /// hardware (like the JC8012P4A1C_I_W_Y camera FPC) where the SCCB
-  /// SDA/SCL lines are hard-wired to the same GPIO pins as another shared
-  /// I2C bus (touchscreen/RTC/audio codec), so a second, independent I2C
-  /// driver can't also claim those pins.
+  /// SCCB (the sensor's I2C register/control bus) always shares an
+  /// already-configured ESPHome `i2c:` bus rather than having `esp_video`
+  /// start a second, independent I2C driver instance. On the
+  /// JC8012P4A1C_I_W_Y camera FPC (and most MIPI-CSI camera modules) the
+  /// SCCB SDA/SCL lines are ordinary GPIOs, often shared with other
+  /// peripherals on the board (touchscreen/RTC/audio codec), so reusing the
+  /// bus that's already configured for them is required, not optional.
   void set_i2c_bus(i2c::I2CBus *bus) { this->external_i2c_bus_ = bus; }
-  /// Dedicated SCCB bus mode: `esp_video` initializes and owns its own I2C
-  /// driver instance on these pins. Only valid when the camera's SCCB lines
-  /// are not shared with any other ESPHome `i2c:` bus.
-  void set_sccb_bus(uint8_t port, uint8_t sda_pin, uint8_t scl_pin, uint32_t frequency) {
-    this->sccb_port_ = port;
-    this->sccb_sda_pin_ = sda_pin;
-    this->sccb_scl_pin_ = scl_pin;
-    this->sccb_frequency_ = frequency;
-  }
   void set_sensor_model(MipiCsiSensorModel model) { this->sensor_model_ = model; }
   void set_resolution(uint16_t width, uint16_t height) {
     this->width_ = width;
@@ -168,10 +160,6 @@ class MipiCsiCamera final : public camera::Camera {
 
   /* configuration */
   i2c::I2CBus *external_i2c_bus_{nullptr};
-  uint8_t sccb_port_{1};
-  uint8_t sccb_sda_pin_{};
-  uint8_t sccb_scl_pin_{};
-  uint32_t sccb_frequency_{100000};
   MipiCsiSensorModel sensor_model_{MIPI_CSI_SENSOR_SC2336};
   uint16_t width_{1280};
   uint16_t height_{720};

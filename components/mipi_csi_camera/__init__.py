@@ -26,7 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@jtenniswood"]
 AUTO_LOAD = ["camera"]
-DEPENDENCIES = ["esp32"]
+DEPENDENCIES = ["esp32", "i2c"]
 
 # Only the ESP32-P4 has a MIPI-CSI receiver.
 ESP32_VARIANT_ESP32P4 = "ESP32P4"
@@ -100,10 +100,6 @@ CONF_FRAMERATE = "framerate"
 CONF_SATURATION = "saturation"
 CONF_PIXEL_FORMAT = "pixel_format"
 CONF_DATA_LANES = "data_lanes"
-CONF_SCCB_SDA_PIN = "sccb_sda_pin"
-CONF_SCCB_SCL_PIN = "sccb_scl_pin"
-CONF_SCCB_PORT = "sccb_port"
-CONF_SCCB_FREQUENCY = "sccb_frequency"
 CONF_POWER_DOWN_PIN = "power_down_pin"
 CONF_HORIZONTAL_MIRROR = "horizontal_mirror"
 CONF_VERTICAL_FLIP = "vertical_flip"
@@ -161,24 +157,6 @@ def _validate_mode(config: ConfigType) -> ConfigType:
     return config
 
 
-def _validate_sccb_bus(config: ConfigType) -> ConfigType:
-    has_i2c_id = CONF_I2C_ID in config
-    has_sda = CONF_SCCB_SDA_PIN in config
-    has_scl = CONF_SCCB_SCL_PIN in config
-
-    if has_i2c_id and (has_sda or has_scl):
-        raise cv.Invalid(
-            f"'{CONF_I2C_ID}' shares an existing i2c bus for SCCB and cannot be combined with "
-            f"'{CONF_SCCB_SDA_PIN}'/'{CONF_SCCB_SCL_PIN}' (dedicated SCCB bus mode)"
-        )
-    if not has_i2c_id and not (has_sda and has_scl):
-        raise cv.Invalid(
-            f"mipi_csi_camera requires either '{CONF_I2C_ID}' (to share an existing i2c: bus) or "
-            f"both '{CONF_SCCB_SDA_PIN}' and '{CONF_SCCB_SCL_PIN}' (dedicated SCCB bus)"
-        )
-    return config
-
-
 def validate_jpeg_quality(config: ConfigType) -> ConfigType:
     quality = config.get(CONF_JPEG_QUALITY)
     if quality != 0 and (quality < 6 or quality > 63):
@@ -203,19 +181,14 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_XCLK_FREQUENCY, default="24MHz"): cv.All(
                 cv.frequency, cv.float_range(min=6e6, max=27e6)
             ),
-            # The SCCB (camera control) bus is an I2C-like link. Some boards
-            # wire it to dedicated pins that esp_video can own directly;
-            # others (e.g. the JC8012P4A1C_I_W_Y camera FPC) hard-wire it to
-            # the same pins as an existing shared `i2c:` bus (touchscreen/
-            # RTC/audio codec), in which case that bus must be reused via
-            # `i2c_id` instead of starting a second, conflicting I2C driver.
-            cv.Optional(CONF_I2C_ID): cv.use_id(i2c.I2CBus),
-            cv.Optional(CONF_SCCB_SDA_PIN): pins.internal_gpio_output_pin_number,
-            cv.Optional(CONF_SCCB_SCL_PIN): pins.internal_gpio_output_pin_number,
-            cv.Optional(CONF_SCCB_PORT, default=1): cv.int_range(min=0, max=1),
-            cv.Optional(CONF_SCCB_FREQUENCY, default="100kHz"): cv.All(
-                cv.frequency, cv.float_range(min=1e3, max=400e3)
-            ),
+            # The MIPI-CSI clock/data lanes (fixed differential SerDes pins on
+            # the ESP32-P4 package) are dedicated hardware and are not
+            # GPIO-routable, so there's nothing to configure for them. SCCB
+            # (the sensor's register/control bus) is an ordinary I2C bus,
+            # though, so it's configured like any other I2C peripheral: via
+            # `i2c_id`, reusing an already-declared `i2c:` bus rather than
+            # opening a second, independent I2C driver on the same pins.
+            cv.GenerateID(CONF_I2C_ID): cv.use_id(i2c.I2CBus),
             cv.Optional(CONF_RESET_PIN): pins.internal_gpio_output_pin_number,
             cv.Optional(CONF_POWER_DOWN_PIN): pins.internal_gpio_output_pin_number,
             cv.Optional(CONF_HORIZONTAL_MIRROR, default=False): cv.boolean,
@@ -252,7 +225,6 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_mode,
     validate_jpeg_quality,
-    _validate_sccb_bus,
 )
 
 
@@ -297,18 +269,8 @@ async def to_code(config: ConfigType) -> None:
     await setup_entity(var, config, "camera")
     await cg.register_component(var, config)
 
-    if CONF_I2C_ID in config:
-        i2c_bus = await cg.get_variable(config[CONF_I2C_ID])
-        cg.add(var.set_i2c_bus(i2c_bus))
-    else:
-        cg.add(
-            var.set_sccb_bus(
-                config[CONF_SCCB_PORT],
-                config[CONF_SCCB_SDA_PIN],
-                config[CONF_SCCB_SCL_PIN],
-                int(config[CONF_SCCB_FREQUENCY]),
-            )
-        )
+    i2c_bus = await cg.get_variable(config[CONF_I2C_ID])
+    cg.add(var.set_i2c_bus(i2c_bus))
 
     cg.add(var.set_sensor_model(config[CONF_SENSOR]))
     width, height = config[CONF_RESOLUTION]
