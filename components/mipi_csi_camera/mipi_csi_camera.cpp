@@ -31,6 +31,8 @@ static const char *sensor_model_to_str(MipiCsiSensorModel model) {
       return "SC2336";
     case MIPI_CSI_SENSOR_OV5647:
       return "OV5647";
+    case MIPI_CSI_SENSOR_OV02C10:
+      return "OV02C10";
   }
   return "UNKNOWN";
 }
