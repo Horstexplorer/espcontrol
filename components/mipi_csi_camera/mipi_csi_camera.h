@@ -151,6 +151,14 @@ class MipiCsiCamera final : public camera::Camera {
   /// the middle of its own timing-sensitive setup sequence (e.g. a touch controller's firmware
   /// upload) has been observed to corrupt that peripheral's I2C transactions.
   float get_setup_priority() const override { return setup_priority::PROCESSOR; }
+  /// Cleanly stops streaming and releases the CSI PHY/sensor/LDO/I2C-SCCB resources before a
+  /// reboot (OTA update, safe-mode reboot, etc). A software reset (SW_CPU_RESET) does not
+  /// power-cycle external peripherals, so if the sensor is left mid-stream and the SCCB device
+  /// registration/LDO channel are left claimed, the next boot's I2C bus can start out in a state
+  /// disturbed by the still-active MIPI-CSI hardware - this was observed to corrupt other I2C
+  /// peripherals (e.g. a touchscreen) doing timing-sensitive setup work right after boot, even
+  /// though the camera component itself hadn't run its own setup() yet on that new boot.
+  void on_shutdown() override;
 
   /* ---- camera::Camera ---- */
   void add_listener(camera::CameraListener *listener) override { this->listeners_.push_back(listener); }
@@ -208,6 +216,8 @@ class MipiCsiCamera final : public camera::Camera {
   std::atomic<uint8_t> stream_requesters_{0};
   QueueHandle_t frame_queue_{nullptr};
   TaskHandle_t capture_task_handle_{nullptr};
+  std::atomic<bool> capture_task_stop_requested_{false};
+  std::atomic<bool> capture_task_stopped_{false};
   std::vector<camera::CameraListener *> listeners_;
 };
 
