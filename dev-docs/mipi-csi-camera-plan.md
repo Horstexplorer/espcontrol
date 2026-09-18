@@ -234,4 +234,43 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   and a full `esphome compile` both succeeded. Root cause of the actual
   buffer/format failure is still unknown — waiting on the user's next log
   capture with these diagnostics in place.
-
+- 2026-09-18 (later): User's next log/serial capture (with the errno
+  diagnostics in place) revealed the real root cause immediately:
+  `open("/dev/video0", ...)` failed with `errno 2` (`ENOENT`) — the video
+  device node was never created at all. Traced through Espressif's own
+  `esp_video_init.c`/`esp_cam_sensor_detect.c` source (fetched from
+  `espressif/esp-video-components` on GitHub) to understand why:
+  `esp_video_init()` discovers camera sensors purely by iterating a runtime
+  array returned by `esp_cam_sensor_detect_get_array()`, built from every
+  `ESP_CAM_SENSOR_DETECT_FN(...)`-registered function that the *linker*
+  actually keeps in the final binary — via a custom `.esp_cam_sensor_detect_fn`
+  linker section. `esp_cam_sensor_detect_detect.h`'s own comment explicitly
+  documents that any driver using this macro needs its own build script to
+  add `target_link_libraries(... INTERFACE "-u <detect_fn>")`, "because
+  otherwise the linker will ignore camera driver as it has no other files
+  depending on any symbols in it" — i.e. an unreferenced object file with
+  only a self-registering function gets silently dropped from the final
+  image by the linker. Espressif's own `sc2336`/`ov5647` drivers get this
+  treatment automatically from `esp_cam_sensor`'s own per-sensor
+  CMakeLists.txt (gated by their own `CONFIG_CAMERA_SC2336`/`..._OV5647`
+  Kconfig options), but our vendored `ov02c10.c` lives outside that build
+  system entirely, so nothing forced it to be linked in — meaning
+  `esp_video_init()`'s sensor-detection loop had *zero* MIPI-CSI entries to
+  try, matching every earlier symptom exactly: it returned instantly
+  (nothing to iterate), returned `ESP_OK` (nothing failed, nothing was
+  attempted), logged nothing (the "failed to detect" `ESP_LOGE` only fires
+  *inside* the loop body, which never executed), and never created
+  `/dev/video0` (the create-video-device step is likewise inside that same
+  loop body). Fixed by adding an explicit reference to the public
+  `ov02c10_detect()` symbol from `mipi_csi_camera.cpp` (a
+  `static void *const ... __attribute__((used)) = &ov02c10_detect;`) —
+  this forces the linker to pull in `ov02c10.c`'s object file to resolve
+  the reference, which brings its self-registering detect-function entry
+  along with it, without needing any ESP-IDF-specific linker-flag plumbing
+  through ESPHome's external-component build generation. Verified via a
+  scratch ESP32-P4 test YAML (`sensor: OV02C10`, `1920x1080`,
+  `data_lanes: 2`): `esphome compile` succeeded, and the generated
+  `test.map` link map now shows
+  `.text.__esp_cam_sensor_detect_fn_ov02c10_detect_ESP_CAM_SENSOR_MIPI_CSI`
+  present in the final image (previously would have been dropped).
+  Scratch test directory removed afterward.

@@ -150,3 +150,18 @@ under a component directory), from Espressif's own driver bundled with the
 repository — genuinely Apache-2.0 licensed (see the SPDX headers in each
 file), even though it isn't (yet, as of writing) published in the public
 managed-component registry.
+
+Because it's vendored outside `esp_cam_sensor`'s own build system, OV02C10
+also needs one small extra piece of glue: `esp_cam_sensor` discovers cameras
+by iterating a runtime array of every `ESP_CAM_SENSOR_DETECT_FN`-registered
+detect function that the *linker* actually kept in the final binary.
+Espressif's own sensors (SC2336, OV5647, …) get force-linked automatically
+by their own component's build scripts; nothing does this for a vendored
+driver, so the linker would otherwise silently drop `ov02c10.c` entirely
+(no compile/link error — it just never gets called, `esp_video_init()`
+succeeds trivially with no camera found, and `/dev/video0` never gets
+created). `mipi_csi_camera.cpp` works around this by taking the address of
+the public `ov02c10_detect()` function in a `__attribute__((used))` static
+variable, forcing the linker to keep the whole object file. See
+[`esp_cam_sensor_detect.h`](https://github.com/espressif/esp-video-components/blob/master/esp_cam_sensor/include/esp_cam_sensor_detect.h)'s
+own comment for background on why this is necessary.
