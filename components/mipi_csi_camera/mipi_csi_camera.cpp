@@ -20,11 +20,24 @@
 #include "esp_video_device.h"
 #include "linux/videodev2.h"
 
+#include "ov02c10.h"
+
 namespace esphome::mipi_csi_camera {
 
 static const char *const TAG = "mipi_csi_camera";
 static constexpr size_t CAPTURE_TASK_STACK_SIZE = 4096;
 static constexpr UBaseType_t CAPTURE_TASK_PRIORITY = 4;
+
+// esp_cam_sensor's auto-detect array only picks up sensor drivers that are part of its own
+// managed component (each of which gets a `-u <sensor>_detect` linker force-reference from its
+// own build scripts). Our vendored OV02C10 driver lives outside that system, so nothing else in
+// the firmware references any symbol from ov02c10.c — meaning the linker silently drops that
+// whole object file (along with its `ESP_CAM_SENSOR_DETECT_FN` auto-registration entry) since it
+// would otherwise appear entirely unused. Referencing `ov02c10_detect()` here forces the linker to
+// keep it, matching the workaround esp_cam_sensor's own header documents for driver authors:
+// https://github.com/espressif/esp-video-components/blob/master/esp_cam_sensor/include/esp_cam_sensor_detect.h
+static void *const ov02c10_detect_keep_alive_ __attribute__((used)) = reinterpret_cast<void *>(&ov02c10_detect);
+
 
 static const char *sensor_model_to_str(MipiCsiSensorModel model) {
   switch (model) {
