@@ -140,6 +140,10 @@ void MipiCsiCamera::setup() {
       .sccb_config = sccb_config,
       .reset_pin = static_cast<gpio_num_t>(this->reset_pin_),
       .pwdn_pin = static_cast<gpio_num_t>(this->power_down_pin_),
+      // The MIPI-CSI PHY and MIPI-DSI display PHY share LDO channel 3 on the ESP32-P4. If the
+      // display already claimed it via ESPHome's esp_ldo component, don't try to acquire it again
+      // here - esp_ldo_acquire_channel() rejects a second exclusive acquire on the same channel.
+      .dont_init_ldo = !this->init_ldo_,
   }};
 
   esp_video_init_config_t init_config = {};
@@ -470,10 +474,11 @@ void MipiCsiCamera::dump_config() {
                 "  Rotation: %u\n"
                 "  Reset Pin: %d\n"
                 "  Power Down Pin: %d\n"
-                "  Frame Buffer Count: %u",
+                "  Frame Buffer Count: %u\n"
+                "  Initialize LDO: %s",
                 sensor_model_to_str(this->sensor_model_), this->width_, this->height_, this->framerate_,
                 pixel_format_to_str(this->pixel_format_), this->data_lanes_, this->rotation_, this->reset_pin_,
-                this->power_down_pin_, this->frame_buffer_count_);
+                this->power_down_pin_, this->frame_buffer_count_, YESNO(this->init_ldo_));
 
   ESP_LOGCONFIG(TAG, "  SCCB: shared i2c bus (port %d)",
                 static_cast<i2c::InternalI2CBus *>(this->external_i2c_bus_)->get_port());

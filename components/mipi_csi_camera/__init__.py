@@ -118,6 +118,7 @@ CONF_VERTICAL_FLIP = "vertical_flip"
 CONF_JPEG_QUALITY = "jpeg_quality"
 CONF_FRAME_BUFFER_COUNT = "frame_buffer_count"
 CONF_XCLK_FREQUENCY = "xclk_frequency"
+CONF_INIT_LDO = "init_ldo"
 
 CONF_ON_STREAM_START = "on_stream_start"
 CONF_ON_STREAM_STOP = "on_stream_stop"
@@ -221,6 +222,12 @@ CONFIG_SCHEMA = cv.All(
                 cv.one_of(0), cv.int_range(min=6, max=63)
             ),
             cv.Optional(CONF_FRAME_BUFFER_COUNT, default=2): cv.int_range(min=2, max=3),
+            # On the ESP32-P4, the MIPI-CSI PHY and the MIPI-DSI display PHY share the same
+            # internal LDO regulator channel (channel 3, 2.5V). If the display is already
+            # configured via ESPHome's `esp_ldo:` component, that channel is already powered and
+            # will reject a second exclusive acquire attempt. Set this to `false` in that case;
+            # leave it at the default `true` if this is the only consumer of that LDO channel.
+            cv.Optional(CONF_INIT_LDO, default=True): cv.boolean,
             cv.Optional(CONF_ON_STREAM_START): automation.validate_automation(
                 {
                     cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
@@ -281,6 +288,7 @@ SETTERS = {
     CONF_SATURATION: "set_saturation",
     CONF_JPEG_QUALITY: "set_jpeg_quality",
     CONF_FRAME_BUFFER_COUNT: "set_frame_buffer_count",
+    CONF_INIT_LDO: "set_init_ldo",
 }
 
 
