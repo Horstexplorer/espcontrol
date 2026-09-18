@@ -38,6 +38,28 @@ logged).
 
 ## Example configuration
 
+Camera FPC sharing the panel's existing touchscreen/RTC `i2c:` bus (the
+JC8012P4A1C_I_W_Y new panel wiring):
+
+```yaml
+i2c:
+  - id: bus_a
+    sda: GPIO7
+    scl: GPIO8
+
+mipi_csi_camera:
+  id: my_camera
+  sensor: SC2336
+  resolution: 1280x720
+  framerate: 30
+  pixel_format: RGB565
+  data_lanes: 2
+  rotation: 90
+  i2c_id: bus_a
+```
+
+Camera with its own dedicated SCCB pins (no shared bus):
+
 ```yaml
 mipi_csi_camera:
   id: my_camera
@@ -64,10 +86,11 @@ mipi_csi_camera:
 | `data_lanes`           | no       | `2`     | MIPI-CSI data lane count (1 or 2); informational, tied to the selected mode. |
 | `rotation`             | no       | `0`     | `0`, `90`, `180`, `270`; hardware PPA rotation (RGB565/RGB888 only).         |
 | `xclk_frequency`       | no       | `24MHz` | Sensor input clock.                                                          |
-| `sccb_sda_pin`         | yes      |         | SCCB (camera I2C) data pin.                                                  |
-| `sccb_scl_pin`         | yes      |         | SCCB clock pin.                                                              |
-| `sccb_port`            | no       | `1`     | I2C port `esp_video` uses for SCCB.                                          |
-| `sccb_frequency`       | no       | `100kHz`| SCCB bus frequency.                                                          |
+| `i2c_id`               | see below| | ID of an existing `i2c:` bus to reuse for SCCB. Use this when the camera's SCCB pins are hard-wired to the same net as another shared I2C bus (see below). Mutually exclusive with `sccb_sda_pin`/`sccb_scl_pin`. |
+| `sccb_sda_pin`         | see below| | SCCB (camera I2C) data pin, for a **dedicated** SCCB bus. Mutually exclusive with `i2c_id`. |
+| `sccb_scl_pin`         | see below| | SCCB clock pin, for a **dedicated** SCCB bus.                                |
+| `sccb_port`            | no       | `1`     | I2C port `esp_video` uses when it owns a dedicated SCCB bus (ignored when `i2c_id` is set). |
+| `sccb_frequency`       | no       | `100kHz`| SCCB bus frequency (ignored when `i2c_id` is set; the shared bus's own frequency applies). |
 | `reset_pin`            | no       |         | Sensor hardware reset pin.                                                   |
 | `power_down_pin`       | no       |         | Sensor power-down pin.                                                       |
 | `horizontal_mirror`    | no       | `false` | Mirrors the image horizontally (`V4L2_CID_HFLIP`).                          |
@@ -76,15 +99,41 @@ mipi_csi_camera:
 | `jpeg_quality`         | no       | `0`     | `0` disables JPEG re-encoding; `6`-`63` re-encodes non-JPEG output.          |
 | `frame_buffer_count`   | no       | `2`     | Number of V4L2 capture buffers (2-3).                                       |
 
+Exactly one of `i2c_id` or the `sccb_sda_pin`/`sccb_scl_pin` pair must be set.
+
 Automations: `on_image` (`CameraImageData image` with `data`/`length`),
 `on_stream_start`, `on_stream_stop`.
 
 ## Notes on the SCCB (camera I2C) bus
 
-`esp_video` owns and initializes its own SCCB bus directly — it is
-intentionally **not** shared with ESPHome's `i2c:` component/bus. Point
-`sccb_sda_pin`/`sccb_scl_pin` at the camera connector's I2C pins even if they
-happen to be the same physical pins used elsewhere on the board.
+Whether the camera's SCCB (control) bus needs a **dedicated** bus or must
+**share** an existing `i2c:` bus depends on how the board wires it:
+
+- **Dedicated bus** (`sccb_sda_pin`/`sccb_scl_pin`): `esp_video` initializes
+  and owns its own I2C driver instance on these pins. Use this when the
+  camera connector has its own, otherwise-unused SDA/SCL pins.
+- **Shared bus** (`i2c_id`): reuses an already-configured ESPHome `i2c:` bus
+  instead of starting a second I2C driver. This is **required** on the
+  JC8012P4A1C_I_W_Y new panel: its schematic shows the camera FPC's SCCB
+  lines (`ES_I2C_SDA`/`ES_I2C_SCL`) hard-wired to the same GPIO7/GPIO8 net
+  already used by the panel's `i2c:` bus for the touchscreen (and RTC/audio
+  codec on other revisions) — a second, independent I2C driver can't also
+  claim those same pins. Point `i2c_id` at that existing `i2c:` bus:
+
+  ```yaml
+  i2c:
+    - id: bus_a
+      sda: GPIO7
+      scl: GPIO8
+
+  mipi_csi_camera:
+    id: cam
+    i2c_id: bus_a
+    resolution: 1280x720
+    ...
+  ```
+
+
 
 ## Attribution
 
