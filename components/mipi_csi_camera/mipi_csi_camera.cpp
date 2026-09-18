@@ -131,6 +131,10 @@ void MipiCsiCamera::setup() {
   esp_video_init_sccb_config_t sccb_config{};
   sccb_config.init_sccb = false;
   sccb_config.i2c_handle = bus_handle;
+  // SCCB register access runs as its own I2C device on the shared bus and needs an explicit
+  // clock speed (0 is rejected by the IDF I2C driver as "invalid scl frequency"); 100kHz is the
+  // standard SCCB speed used by every sensor/board reference example.
+  sccb_config.freq = 100000;
 
   esp_video_init_csi_config_t csi_config[] = {{
       .sccb_config = sccb_config,
