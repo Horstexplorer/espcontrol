@@ -50,6 +50,7 @@ MipiCsiSensorModel = mipi_csi_camera_ns.enum("MipiCsiSensorModel")
 SENSOR_MODELS = {
     "SC2336": MipiCsiSensorModel.MIPI_CSI_SENSOR_SC2336,
     "OV5647": MipiCsiSensorModel.MIPI_CSI_SENSOR_OV5647,
+    "OV02C10": MipiCsiSensorModel.MIPI_CSI_SENSOR_OV02C10,
 }
 
 MipiCsiPixelFormat = mipi_csi_camera_ns.enum("MipiCsiPixelFormat")
@@ -90,6 +91,17 @@ SUPPORTED_MODES = {
         (1920, 1080, "RAW10", 30),
         (1280, 960, "RAW10", 45),
     },
+    "OV02C10": {
+        (1288, 728, "RAW10", 30),
+        (1920, 1080, "RAW10", 30),
+    },
+}
+# OV02C10's register tables are also lane-count-specific (unlike SC2336/OV5647,
+# where data_lanes is purely a wiring choice independent of the capture mode):
+# 1288x728 only has a 1-lane table, 1920x1080 has both a 1-lane and 2-lane one.
+OV02C10_LANE_MODES = {
+    (1288, 728): {1},
+    (1920, 1080): {1, 2},
 }
 # The ISP can convert any RAW mode into these processed output formats without
 # needing a matching entry of its own in SUPPORTED_MODES.
@@ -152,6 +164,15 @@ def _validate_mode(config: ConfigType) -> ConfigType:
             raise cv.Invalid(
                 f"{sensor} has no {width}x{height} capture mode at {framerate} fps to "
                 f"derive {fmt} from. Supported modes: {sorted(modes)}"
+            )
+
+    if sensor == "OV02C10":
+        allowed_lanes = OV02C10_LANE_MODES.get((width, height), set())
+        data_lanes = config[CONF_DATA_LANES]
+        if data_lanes not in allowed_lanes:
+            raise cv.Invalid(
+                f"OV02C10 has no {width}x{height} register table for {data_lanes} data "
+                f"lane(s). Valid lane counts for this resolution: {sorted(allowed_lanes)}"
             )
 
     return config
@@ -309,3 +330,20 @@ async def to_code(config: ConfigType) -> None:
     add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE", True)
     add_idf_sdkconfig_option("CONFIG_CAMERA_SC2336", config[CONF_SENSOR] == "SC2336")
     add_idf_sdkconfig_option("CONFIG_CAMERA_OV5647", config[CONF_SENSOR] == "OV5647")
+
+    if config[CONF_SENSOR] == "OV02C10":
+        # OV02C10 isn't in the espressif/esp_cam_sensor managed component
+        # registry, so its driver is vendored under sensors/ov02c10/ instead
+        # (see that directory's ov02c10_compat.h and README.md for details).
+        # It has no real Kconfig entry to toggle via add_idf_sdkconfig_option,
+        # so its "which capture mode is compiled in" macro is supplied
+        # directly as a global build flag instead.
+        width, height = config[CONF_RESOLUTION]
+        lanes = config[CONF_DATA_LANES]
+        format_macro = {
+            (1288, 728, 1): "CONFIG_CAMERA_OV02C10_MIPI_RAW10_1288X728_30FPS",
+            (1920, 1080, 1): "CONFIG_CAMERA_OV02C10_MIPI_RAW10_1920X1080_30FPS_1_LANE",
+            (1920, 1080, 2): "CONFIG_CAMERA_OV02C10_MIPI_RAW10_1920X1080_30FPS_2_LANE",
+        }[(width, height, lanes)]
+        cg.add_build_flag(f"-D{format_macro}=1")
+        cg.add_build_flag("-DCONFIG_CAMERA_OV02C10_MIPI_IF_FORMAT_INDEX_DEFAULT=0")

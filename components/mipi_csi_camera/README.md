@@ -12,7 +12,8 @@ listener/image-reader interface as `esp32_camera`.
 - **ESP32-P4 only** — MIPI-CSI is not available on other ESP32 variants.
 - Camera sensors: **SC2336** (2MP) and **OV5647** (5MP), the two sensors
   supported by Espressif's ESP32-P4-Function-EV-Board BSP that the
-  JC8012P4A1C_I_W_Y New Panel reuses.
+  JC8012P4A1C_I_W_Y New Panel reuses, plus **OV02C10** (2MP), which is what
+  actual JC8012P4A1C_I_W_Y New Panel units ship with (see below).
 
 ## How it works
 
@@ -25,7 +26,10 @@ wraps Espressif's own camera stack:
   `DQBUF`/`STREAMON`).
 - [`esp_cam_sensor`](https://components.espressif.com/components/espressif/esp_cam_sensor)
   provides the SC2336/OV5647 register tables for each supported
-  resolution/format/framerate combination.
+  resolution/format/framerate combination. **OV02C10 is vendored directly
+  into this component instead** (`ov02c10*.{c,h}`): it isn't published in
+  that managed component registry, so its driver — Espressif's own,
+  Apache-2.0 licensed — is compiled in directly. See "Attribution" below.
 
 Frames are captured on a dedicated FreeRTOS task and handed to ESPHome's
 camera plumbing exactly like `esp32_camera` does, so listeners (e.g. the API
@@ -73,11 +77,11 @@ mipi_csi_camera:
 
 | Option               | Required | Default | Description                                                                 |
 | --------------------- | -------- | ------- | ---------------------------------------------------------------------------- |
-| `sensor`              | no       | `SC2336`| `SC2336` or `OV5647`.                                                        |
+| `sensor`              | no       | `SC2336`| `SC2336`, `OV5647`, or `OV02C10` (the sensor actual JC8012P4A1C_I_W_Y units ship with). |
 | `resolution`           | yes      |         | `WIDTHxHEIGHT`, must match one of the sensor's supported capture modes.      |
 | `framerate`            | no       | `30`    | Frames per second; validated against the sensor's mode table.                |
 | `pixel_format`         | no       | `RGB565`| `RAW8`, `RAW10`, `GRAYSCALE`, `RGB565`, `RGB888`, `YUV422`, `YUV420`.        |
-| `data_lanes`           | no       | `2`     | MIPI-CSI data lane count (1 or 2); informational, tied to the selected mode. |
+| `data_lanes`           | no       | `2`     | MIPI-CSI data lane count (1 or 2). For SC2336/OV5647 this is informational (tied to the mode); for OV02C10 it also selects which register table is compiled in, so only specific resolution/lane combinations are valid (see below). |
 | `rotation`             | no       | `0`     | `0`, `90`, `180`, `270`; hardware PPA rotation (RGB565/RGB888 only).         |
 | `xclk_frequency`       | no       | `24MHz` | Sensor input clock.                                                          |
 | `i2c_id`               | no*      |         | ID of the `i2c:` bus SCCB should use. If omitted and exactly one `i2c:` bus is declared, that bus is used automatically (standard ESPHome behavior); otherwise it must be specified explicitly. |
@@ -91,6 +95,22 @@ mipi_csi_camera:
 
 Automations: `on_image` (`CameraImageData image` with `data`/`length`),
 `on_stream_start`, `on_stream_stop`.
+
+## OV02C10 valid resolution/lane combinations
+
+OV02C10's register tables are baked in per resolution *and* lane count (unlike
+SC2336/OV5647, where `data_lanes` is purely a wiring choice). Only these three
+combinations are valid; anything else is rejected at config-validation time:
+
+| `resolution`  | `data_lanes` | `pixel_format` (RAW) | `framerate` |
+| ------------- | ------------ | --------------------- | ----------- |
+| `1288x728`    | `1`          | `RAW10`               | `30`        |
+| `1920x1080`   | `1`          | `RAW10`               | `30`        |
+| `1920x1080`   | `2`          | `RAW10`               | `30`        |
+
+As with the other sensors, any ISP output format (`GRAYSCALE`/`RGB565`/
+`RGB888`/`YUV422`/`YUV420`) can be requested at the same resolution/framerate
+instead of `RAW10`.
 
 ## Notes on the SCCB (camera I2C) bus
 
@@ -118,3 +138,15 @@ vendor reference example this component was modeled on, and
 for another independent ESPHome MIPI-CSI camera implementation for the same
 board (targeting the OV02C10 sensor) used as a secondary reference while
 building this component.
+
+The OV02C10 sensor driver (`ov02c10.c`/`ov02c10*.h`) is vendored directly
+into this component rather than pulled from the `espressif/esp_cam_sensor`
+managed component registry, because OV02C10 isn't published there. It's
+copied, with only minimal adaptation (see `ov02c10_compat.h`, and the
+`#pragma once`/self-contained include additions to the per-mode register
+table headers, needed because ESPHome bare-`#include`s every header it finds
+under a component directory), from Espressif's own driver bundled with the
+`JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display` vendor reference SDK in this
+repository — genuinely Apache-2.0 licensed (see the SPDX headers in each
+file), even though it isn't (yet, as of writing) published in the public
+managed-component registry.

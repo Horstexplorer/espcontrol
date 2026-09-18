@@ -158,3 +158,55 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   cleanly against the real `esp_video`/`esp_cam_sensor` IDF components
   (Flash 5.7%, RAM 12.2%). Scratch test directory removed afterward.
 
+- 2026-09-19: User reported `Setup Failed: ESP_FAIL` on their actual device
+  with `sensor: SC2336`. Neither of the component's own `ESP_LOGE` failure
+  paths appeared anywhere in the 1273-line log they provided, so diagnosed
+  from other evidence instead: the log's I2C bus scan showed a device only
+  at address `0x36`, never at `0x30` (SC2336's SCCB address) — and the
+  vendor's own `JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display/sdkconfig.defaults`
+  sets `CONFIG_CAMERA_OV02C10=y`, whose SCCB address is `0x36`. Confirmed:
+  actual JC8012P4A1C_I_W_Y New Panel units ship with an **OV02C10** sensor,
+  not SC2336/OV5647 — those were only ever an assumption carried over from
+  the generic ESP32-P4-Function-EV-Board BSP this component was originally
+  modeled on. This was a genuine feature gap, not a user config mistake.
+  OV02C10 isn't published in the `espressif/esp_cam_sensor` managed
+  component registry (confirmed via GitHub directory listing/code search),
+  so it can't be added the same way as SC2336/OV5647. User chose to add
+  OV02C10 support now.
+- 2026-09-19: Vendored Espressif's own OV02C10 driver (Apache-2.0, sourced
+  from the untracked `JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display/
+  components/esp_cam_sensor/sensors/ov02c10/` reference dump the user
+  originally provided) directly into `components/mipi_csi_camera/` — flat,
+  not in a subdirectory, because ESPHome's external-component file discovery
+  only picks up source files directly in a component's own directory (no
+  subfolder nesting at all, confirmed by reading `esphome/loader.py`).
+  Required three adaptations to the vendored files: (1) a small
+  `ov02c10_compat.h` defining two Kconfig-derived constants
+  (`CONFIG_CAMERA_OV02C10_MAX_SUPPORT`, `..._ABSOLUTE_GAIN_LIMIT`) that have
+  no real Kconfig entry in our build (ESP-IDF silently drops
+  `sdkconfig.defaults` options with no matching Kconfig declaration, ruling
+  out reusing `add_idf_sdkconfig_option()` here); (2) the three mutually-
+  exclusive "which capture mode is compiled in" macros
+  (`CONFIG_CAMERA_OV02C10_MIPI_RAW10_...`) plus
+  `..._FORMAT_INDEX_DEFAULT` are instead supplied as global `-D` build flags
+  from Python, chosen from the user's `resolution`/`data_lanes` selection;
+  (3) gave each per-mode register-table header (`ov02c10_mipi_*.h`) its own
+  `#pragma once` and made it include its own dependencies
+  (`ov02c10_regs.h`/`ov02c10_types.h`) — needed because ESPHome's
+  auto-generated `esphome.h` bare-`#include`s every header found under a
+  component directory (alphabetically, independent of any other header's
+  internal include order), which both broke macro-definition order and
+  caused duplicate-definition errors the first time this was compiled.
+  Added `OV02C10` to `SENSOR_MODELS`/`MipiCsiSensorModel`, its 3 valid
+  resolution/lane combinations (`1288x728`@1-lane, `1920x1080`@1-lane,
+  `1920x1080`@2-lane, all `RAW10`@30fps) with dedicated `cv.Invalid`
+  validation, and a `sensor_model_to_str()` case. Also fixed a copy-paste
+  bug inherited from the vendor source (`ov02c10.h`'s detect-function
+  prototype said `sc2336_detect` instead of `ov02c10_detect`). Verified
+  end-to-end with a scratch ESP32-P4 test YAML (`sensor: OV02C10`,
+  `1920x1080`, `data_lanes: 2`): `esphome config` passed, and a full
+  `esphome compile` succeeded (including compiling `ov02c10.c` itself) after
+  the header-ordering fix above. Scratch test directory removed afterward.
+  Updated `README.md` (OV02C10 supported-sensor note, valid resolution/lane
+  table, attribution for the vendored driver).
+

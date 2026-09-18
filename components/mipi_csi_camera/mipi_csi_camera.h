@@ -26,6 +26,7 @@ namespace esphome::mipi_csi_camera {
 enum MipiCsiSensorModel : uint8_t {
   MIPI_CSI_SENSOR_SC2336 = 0,
   MIPI_CSI_SENSOR_OV5647,
+  MIPI_CSI_SENSOR_OV02C10,
 };
 
 /// Requested output pixel format. RAW8/RAW10 are the sensor's native Bayer
