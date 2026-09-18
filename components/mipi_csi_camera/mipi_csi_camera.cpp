@@ -99,32 +99,22 @@ size_t MipiCsiCamera::bytes_per_pixel_() const {
 /* ---------------- setup ---------------- */
 
 void MipiCsiCamera::setup() {
-  esp_video_init_sccb_config_t sccb_config{};
-
-  if (this->external_i2c_bus_ != nullptr) {
-    // Share an already-initialized ESPHome `i2c:` bus. This is required
-    // whenever the camera FPC's SCCB SDA/SCL lines are hard-wired to the
-    // same physical pins as another shared I2C bus (e.g. touchscreen/RTC on
-    // the JC8012P4A1C_I_W_Y panel) -- a second, independent I2C driver
-    // instance can't also claim those pins.
-    auto *internal_bus = static_cast<i2c::InternalI2CBus *>(this->external_i2c_bus_);
-    i2c_master_bus_handle_t bus_handle{};
-    esp_err_t err = i2c_master_get_bus_handle(static_cast<i2c_port_num_t>(internal_bus->get_port()), &bus_handle);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to get i2c bus handle for shared SCCB bus: %s", esp_err_to_name(err));
-      this->init_error_ = err;
-      this->mark_failed();
-      return;
-    }
-    sccb_config.init_sccb = false;
-    sccb_config.i2c_handle = bus_handle;
-  } else {
-    sccb_config.init_sccb = true;
-    sccb_config.i2c_config.port = this->sccb_port_;
-    sccb_config.i2c_config.scl_pin = static_cast<gpio_num_t>(this->sccb_scl_pin_);
-    sccb_config.i2c_config.sda_pin = static_cast<gpio_num_t>(this->sccb_sda_pin_);
-    sccb_config.freq = this->sccb_frequency_;
+  // SCCB always reuses the already-configured ESPHome `i2c:` bus (see
+  // set_i2c_bus()) rather than starting a second, independent I2C driver;
+  // the config schema guarantees external_i2c_bus_ is set before setup().
+  auto *internal_bus = static_cast<i2c::InternalI2CBus *>(this->external_i2c_bus_);
+  i2c_master_bus_handle_t bus_handle{};
+  esp_err_t err = i2c_master_get_bus_handle(static_cast<i2c_port_num_t>(internal_bus->get_port()), &bus_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to get i2c bus handle for SCCB: %s", esp_err_to_name(err));
+    this->init_error_ = err;
+    this->mark_failed();
+    return;
   }
+
+  esp_video_init_sccb_config_t sccb_config{};
+  sccb_config.init_sccb = false;
+  sccb_config.i2c_handle = bus_handle;
 
   esp_video_init_csi_config_t csi_config[] = {{
       .sccb_config = sccb_config,
@@ -149,10 +139,10 @@ void MipiCsiCamera::setup() {
 
   ppa_client_config_t ppa_config = {};
   ppa_config.oper_type = PPA_OPERATION_SRM;
-  esp_err_t err = ppa_register_client(&ppa_config, &this->ppa_handle_);
-  if (err != ESP_OK) {
+  esp_err_t ppa_err = ppa_register_client(&ppa_config, &this->ppa_handle_);
+  if (ppa_err != ESP_OK) {
     // Rotation just won't be available; capture still works.
-    ESP_LOGW(TAG, "PPA client registration failed (%s); rotation will be disabled", esp_err_to_name(err));
+    ESP_LOGW(TAG, "PPA client registration failed (%s); rotation will be disabled", esp_err_to_name(ppa_err));
     this->ppa_handle_ = nullptr;
   }
 
@@ -238,21 +228,21 @@ bool MipiCsiCamera::allocate_buffers_() {
     buf.index = i;
 
     if (ioctl(this->video_fd_, VIDIOC_QUERYBUF, &buf) != 0) {
-      ESP_LOGE(TAG, "Failed to query capture buffer %u", i);
+      ESP_LOGE(TAG, "Failed to query capture buffer %" PRIu32, i);
       return false;
     }
 
     auto *mapped = static_cast<uint8_t *>(
         mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, this->video_fd_, buf.m.offset));
     if (mapped == MAP_FAILED) {  // NOLINT(performance-no-int-to-ptr)
-      ESP_LOGE(TAG, "Failed to mmap capture buffer %u", i);
+      ESP_LOGE(TAG, "Failed to mmap capture buffer %" PRIu32, i);
       return false;
     }
     this->capture_buffers_[i] = mapped;
     this->capture_buffer_size_ = buf.length;
 
     if (ioctl(this->video_fd_, VIDIOC_QBUF, &buf) != 0) {
-      ESP_LOGE(TAG, "Failed to queue capture buffer %u", i);
+      ESP_LOGE(TAG, "Failed to queue capture buffer %" PRIu32, i);
       return false;
     }
   }
@@ -462,13 +452,8 @@ void MipiCsiCamera::dump_config() {
                 pixel_format_to_str(this->pixel_format_), this->data_lanes_, this->rotation_, this->reset_pin_,
                 this->power_down_pin_, this->frame_buffer_count_);
 
-  if (this->external_i2c_bus_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  SCCB: shared i2c bus (port %d)",
-                  static_cast<i2c::InternalI2CBus *>(this->external_i2c_bus_)->get_port());
-  } else {
-    ESP_LOGCONFIG(TAG, "  SCCB: dedicated bus, port %u, SDA:%d SCL:%d, %" PRIu32 " Hz", this->sccb_port_,
-                  this->sccb_sda_pin_, this->sccb_scl_pin_, this->sccb_frequency_);
-  }
+  ESP_LOGCONFIG(TAG, "  SCCB: shared i2c bus (port %d)",
+                static_cast<i2c::InternalI2CBus *>(this->external_i2c_bus_)->get_port());
 
   if (this->is_failed()) {
     ESP_LOGE(TAG, "  Setup Failed: %s", esp_err_to_name(this->init_error_));

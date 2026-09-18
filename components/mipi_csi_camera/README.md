@@ -36,10 +36,21 @@ Processing Accelerator) and is currently supported for `RGB565`/`RGB888`
 output only; other pixel formats ignore the `rotation` option (a warning is
 logged).
 
-## Example configuration
+### Why there's no MIPI-CSI pin configuration
 
-Camera FPC sharing the panel's existing touchscreen/RTC `i2c:` bus (the
-JC8012P4A1C_I_W_Y new panel wiring):
+The CSI clock/data lanes are a fixed differential SerDes block wired directly
+into the ESP32-P4 package (pins `CSI_CLK_P/N` and `CSI_DATA0/1_P/N`) — unlike
+regular GPIOs, they aren't routed through the GPIO matrix, so there's nothing
+to make configurable there; this component talks to them only through
+`esp_video`.
+
+The sensor's SCCB bus (its register/control interface) is a different story:
+it's an ordinary I2C bus on regular GPIOs. That means it's configured the
+same way any other I2C peripheral is in ESPHome — via `i2c_id`, referencing
+an `i2c:` bus you declare separately — instead of the component opening a
+second, independent I2C driver of its own. See below.
+
+## Example configuration
 
 ```yaml
 i2c:
@@ -58,23 +69,6 @@ mipi_csi_camera:
   i2c_id: bus_a
 ```
 
-Camera with its own dedicated SCCB pins (no shared bus):
-
-```yaml
-mipi_csi_camera:
-  id: my_camera
-  sensor: SC2336
-  resolution: 1280x720
-  framerate: 30
-  pixel_format: RGB565
-  data_lanes: 2
-  rotation: 90
-  sccb_sda_pin: GPIO7
-  sccb_scl_pin: GPIO8
-  reset_pin: GPIO26
-  power_down_pin: GPIO27
-```
-
 ## Configuration variables
 
 | Option               | Required | Default | Description                                                                 |
@@ -86,54 +80,32 @@ mipi_csi_camera:
 | `data_lanes`           | no       | `2`     | MIPI-CSI data lane count (1 or 2); informational, tied to the selected mode. |
 | `rotation`             | no       | `0`     | `0`, `90`, `180`, `270`; hardware PPA rotation (RGB565/RGB888 only).         |
 | `xclk_frequency`       | no       | `24MHz` | Sensor input clock.                                                          |
-| `i2c_id`               | see below| | ID of an existing `i2c:` bus to reuse for SCCB. Use this when the camera's SCCB pins are hard-wired to the same net as another shared I2C bus (see below). Mutually exclusive with `sccb_sda_pin`/`sccb_scl_pin`. |
-| `sccb_sda_pin`         | see below| | SCCB (camera I2C) data pin, for a **dedicated** SCCB bus. Mutually exclusive with `i2c_id`. |
-| `sccb_scl_pin`         | see below| | SCCB clock pin, for a **dedicated** SCCB bus.                                |
-| `sccb_port`            | no       | `1`     | I2C port `esp_video` uses when it owns a dedicated SCCB bus (ignored when `i2c_id` is set). |
-| `sccb_frequency`       | no       | `100kHz`| SCCB bus frequency (ignored when `i2c_id` is set; the shared bus's own frequency applies). |
-| `reset_pin`            | no       |         | Sensor hardware reset pin.                                                   |
-| `power_down_pin`       | no       |         | Sensor power-down pin.                                                       |
+| `i2c_id`               | no*      |         | ID of the `i2c:` bus SCCB should use. If omitted and exactly one `i2c:` bus is declared, that bus is used automatically (standard ESPHome behavior); otherwise it must be specified explicitly. |
+| `reset_pin`            | no       |         | Sensor hardware reset pin (only if your camera module has one wired to a GPIO). |
+| `power_down_pin`       | no       |         | Sensor power-down pin (only if your camera module has one wired to a GPIO). |
 | `horizontal_mirror`    | no       | `false` | Mirrors the image horizontally (`V4L2_CID_HFLIP`).                          |
 | `vertical_flip`        | no       | `false` | Flips the image vertically (`V4L2_CID_VFLIP`).                              |
 | `contrast`/`brightness`/`saturation` | no | `0` | `-2` to `2`, forwarded to the sensor if supported.               |
 | `jpeg_quality`         | no       | `0`     | `0` disables JPEG re-encoding; `6`-`63` re-encodes non-JPEG output.          |
 | `frame_buffer_count`   | no       | `2`     | Number of V4L2 capture buffers (2-3).                                       |
 
-Exactly one of `i2c_id` or the `sccb_sda_pin`/`sccb_scl_pin` pair must be set.
-
 Automations: `on_image` (`CameraImageData image` with `data`/`length`),
 `on_stream_start`, `on_stream_stop`.
 
 ## Notes on the SCCB (camera I2C) bus
 
-Whether the camera's SCCB (control) bus needs a **dedicated** bus or must
-**share** an existing `i2c:` bus depends on how the board wires it:
+SCCB always reuses an existing `i2c:` bus (via `i2c_id`) rather than the
+component starting a second, independent I2C driver of its own. On the
+JC8012P4A1C_I_W_Y new panel this isn't just a convenience: the schematic
+shows the camera FPC's SCCB lines (`ES_I2C_SDA`/`ES_I2C_SCL`) hard-wired to
+the exact same GPIO7/GPIO8 net already used by the panel's `i2c:` bus for the
+touchscreen (and RTC/audio codec on other revisions) — a second, independent
+I2C driver instance couldn't claim those same pins even if we wanted it to.
 
-- **Dedicated bus** (`sccb_sda_pin`/`sccb_scl_pin`): `esp_video` initializes
-  and owns its own I2C driver instance on these pins. Use this when the
-  camera connector has its own, otherwise-unused SDA/SCL pins.
-- **Shared bus** (`i2c_id`): reuses an already-configured ESPHome `i2c:` bus
-  instead of starting a second I2C driver. This is **required** on the
-  JC8012P4A1C_I_W_Y new panel: its schematic shows the camera FPC's SCCB
-  lines (`ES_I2C_SDA`/`ES_I2C_SCL`) hard-wired to the same GPIO7/GPIO8 net
-  already used by the panel's `i2c:` bus for the touchscreen (and RTC/audio
-  codec on other revisions) — a second, independent I2C driver can't also
-  claim those same pins. Point `i2c_id` at that existing `i2c:` bus:
-
-  ```yaml
-  i2c:
-    - id: bus_a
-      sda: GPIO7
-      scl: GPIO8
-
-  mipi_csi_camera:
-    id: cam
-    i2c_id: bus_a
-    resolution: 1280x720
-    ...
-  ```
-
-
+The same camera FPC's other two control lines (`CSI_IO0`/`CSI_IO1`) are only
+pulled up to 3.3V through resistors on this board, with no GPIO connection —
+so there's no software-controlled reset/power-down pin to set for this
+particular panel revision; leave `reset_pin`/`power_down_pin` unset.
 
 ## Attribution
 
@@ -141,4 +113,8 @@ This component is original code written for espcontrol, built on top of the
 `espressif/esp_video` and `espressif/esp_cam_sensor` managed IDF components
 (Apache-2.0 licensed, published by Espressif Systems). See
 `JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display` in this repository for the
-vendor reference example this component was modeled on.
+vendor reference example this component was modeled on, and
+[sullb/esphome-p4-csi-camera](https://github.com/sullb/esphome-p4-csi-camera)
+for another independent ESPHome MIPI-CSI camera implementation for the same
+board (targeting the OV02C10 sensor) used as a secondary reference while
+building this component.
