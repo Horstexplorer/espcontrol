@@ -248,25 +248,46 @@ the watchdog and reboot the device. If you hit this:
 
 This component is original code written for espcontrol, built on top of the
 `espressif/esp_video` and `espressif/esp_cam_sensor` managed IDF components
-(Apache-2.0 licensed, published by Espressif Systems). See
-`JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display` in this repository for the
-vendor reference example this component was modeled on, and
+(Apache-2.0 licensed, published by Espressif Systems). It was modeled on the
+`JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display` vendor reference example
+(part of Guition's board SDK for this panel; kept locally by contributors
+during development, **not committed to this repository** - see below for
+why), and on
 [sullb/esphome-p4-csi-camera](https://github.com/sullb/esphome-p4-csi-camera)
-for another independent ESPHome MIPI-CSI camera implementation for the same
-board (targeting the OV02C10 sensor) used as a secondary reference while
+(another independent ESPHome MIPI-CSI camera implementation for the same
+board, targeting the OV02C10 sensor) used as a secondary reference while
 building this component.
 
 The OV02C10 sensor driver (`ov02c10.c`/`ov02c10*.h`) is vendored directly
 into this component rather than pulled from the `espressif/esp_cam_sensor`
-managed component registry, because OV02C10 isn't published there. It's
-copied, with only minimal adaptation (see `ov02c10_compat.h`, and the
-`#pragma once`/self-contained include additions to the per-mode register
-table headers, needed because ESPHome bare-`#include`s every header it finds
-under a component directory), from Espressif's own driver bundled with the
-`JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display` vendor reference SDK in this
-repository — genuinely Apache-2.0 licensed (see the SPDX headers in each
-file), even though it isn't (yet, as of writing) published in the public
-managed-component registry.
+managed component registry, because OV02C10 isn't published there (no
+release of `esp_cam_sensor`, up to and including the versions available as
+of writing, ships an `ov02c10` sensor directory - the registry has `os02n10`
+and `os04c10`, but not `ov02c10`). Its **only known source** is Espressif's
+own driver as redistributed inside board vendors' proprietary SDK packages;
+in this project's case, Guition's `JC8012P4A1C_I_W_Y_New_Panel` SDK bundle.
+That bundle is not committed to this repository (it's a large, vendor-owned
+archive kept locally by whoever is developing this component, not something
+this project can redistribute as a whole) - so this Attribution section, not
+a path inside the repo, is the citable record of where these files came
+from. The files themselves are copied verbatim (only minimal adaptation, see
+`ov02c10_compat.h` and the `#pragma once`/self-contained include additions to
+the per-mode register table headers, needed because ESPHome bare-`#include`s
+every header it finds under a component directory) and each still carries
+its own original `SPDX-FileCopyrightText: ... Espressif Systems (Shanghai)
+CO LTD` / `SPDX-License-Identifier: Apache-2.0` header, which is what
+actually establishes the license these files are redistributed under here -
+not the vendor SDK's own (unknown/unpublished) terms for the rest of that
+package. This isn't a one-off situation: the identical driver (SPDX headers,
+code, and structure) also turns up vendored the same way in several other
+independent public projects for the same or related boards - e.g.
+[kdmukai/esp-board-common](https://github.com/kdmukai/esp-board-common)
+(whose own `PROVENANCE.md` documents pulling it from a Guition
+`JC4880P443C_I_W.zip` vendor SDK drop, and confirms OV02C10 is absent from
+the public `esp_cam_sensor` registry) and forks such as
+[kruzio1985/BETTA-HA-PANEL-10-Guiton-JC8012P4A1C](https://github.com/kruzio1985/BETTA-HA-PANEL-10-Guiton-JC8012P4A1C) -
+confirming this vendor SDK, not any public Espressif GitHub repository, is
+genuinely the only place this driver circulates from.
 
 All OV02C10-specific glue code that isn't part of the vendored driver itself
 (the linker keep-alive workaround, and the software color-cast correction -
