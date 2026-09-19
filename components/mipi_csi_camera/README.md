@@ -10,6 +10,10 @@ listener/image-reader interface as `esp32_camera`.
 ## Supported hardware
 
 - **ESP32-P4 only** — MIPI-CSI is not available on other ESP32 variants.
+- **ESP-IDF framework only** — this component is built entirely on ESP-IDF
+  APIs (`esp_video`, PPA, the hardware JPEG encoder, ...), so `esp32:
+  framework: type` must be `esp-idf`. (ESPHome only supports ESP-IDF for the
+  ESP32-P4 anyway, so this is normally automatic.)
 - Camera sensors: **SC2336** (2MP) and **OV5647** (5MP), the two sensors
   supported by Espressif's ESP32-P4-Function-EV-Board BSP that the
   JC8012P4A1C_I_W_Y New Panel reuses, plus **OV02C10** (2MP), which is what
@@ -82,7 +86,7 @@ mipi_csi_camera:
 | `framerate`            | no       | `30`    | Frames per second; validated against the sensor's mode table.                |
 | `pixel_format`         | no       | `RGB565`| `RAW8`, `RAW10`, `GRAYSCALE`, `RGB565`, `RGB888`, `YUV422`, `YUV420`.        |
 | `data_lanes`           | no       | `2`     | MIPI-CSI data lane count (1 or 2). For SC2336/OV5647 this is informational (tied to the mode); for OV02C10 it also selects which register table is compiled in, so only specific resolution/lane combinations are valid (see below). |
-| `rotation`             | no       | `0`     | `0`, `90`, `180`, `270`; hardware PPA rotation (RGB565/RGB888 only).         |
+| `rotation`             | no       | `0`     | `0`, `90`, `180`, `270`; hardware PPA rotation (RGB565/RGB888 only). Requires a `psram:` component (the rotated frame is buffered in PSRAM). |
 | `xclk_frequency`       | no       | `24MHz` | Sensor input clock.                                                          |
 | `i2c_id`               | no*      |         | ID of the `i2c:` bus SCCB should use. If omitted and exactly one `i2c:` bus is declared, that bus is used automatically (standard ESPHome behavior); otherwise it must be specified explicitly. |
 | `reset_pin`            | no       |         | Sensor hardware reset pin (only if your camera module has one wired to a GPIO). |

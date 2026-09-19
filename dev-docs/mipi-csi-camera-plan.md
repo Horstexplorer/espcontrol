@@ -751,3 +751,52 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
             mirror options being called out explicitly; user to reflash and confirm
             the color-correction fix from the previous entry still works as expected
             (this entry didn't change any of that logic, only where it lives).
+- 2026-09-19: Checked where the vendored `ov02c10*` files with Espressif
+  copyright headers actually come from, since the README's Attribution
+  section cited `JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display` as being "in
+  this repository" - confirmed that folder is **untracked** in git in the
+  main checkout and doesn't exist at all in this worktree, so that citation
+  was factually wrong for anyone cloning the real repo. Found independent
+  public confirmation that the driver is Espressif's own Apache-2.0 code,
+  distributed only through board-vendor SDK drops (not the public
+  `espressif/esp_cam_sensor` component registry, which has `os02n10`/
+  `os04c10` but not `ov02c10`): `kdmukai/esp-board-common`'s `PROVENANCE.md`
+  documents pulling the identical driver from a Guition `JC4880P443C_I_W.zip`
+  SDK package, and `kruzio1985/BETTA-HA-PANEL-10-Guiton-JC8012P4A1C` vendors
+  the same files the same way. Rewrote `README.md`'s Attribution section to
+  cite the files' own SPDX headers plus these external, independently
+  verifiable sources instead of the untracked local folder, and added a note
+  in "Hardware / vendor reference facts" above flagging that folder as a
+  local-only dev reference, not part of the repository.
+- 2026-09-19: Audited the component's declared dependencies in `__init__.py`
+  for gaps. `DEPENDENCIES = ["esp32", "i2c"]` and `AUTO_LOAD = ["camera"]`
+  were already correct. Found two real gaps in `_final_validate()`:
+  - No check that `esp32: framework: type` is `esp-idf`, despite the
+    component being built entirely on ESP-IDF-only APIs (`esp_video`/
+    `esp_cam_sensor` managed components, `driver/ppa.h`, `driver/
+    jpeg_encode.h`, `esp_cache.h`, ...). Added a `cv.Invalid` check mirroring
+    the existing ESP32-P4-variant check. In practice ESPHome's own `esp32`
+    component already refuses Arduino for the P4 variant before this check
+    would even run (confirmed via a scratch `esphome config` test), so this
+    is currently unreachable in normal use - but it documents the real
+    requirement explicitly and guards against any future ESPHome change that
+    might loosen that restriction.
+  - `rotate_frame_()` (and, defensively, the currently-no-op
+    `destride_frame_()`) allocate their working buffer from
+    `MALLOC_CAP_SPIRAM` whenever `rotation != 0`, but the existing psram
+    check only fired for `jpeg_quality`. Extended the same check to also
+    require `psram:` when `rotation != 0`, with a message naming the actual
+    reason ("Rotation" vs "JPEG re-encoding"). Previously this failed softly
+    at runtime (a logged warning + falling back to the unrotated frame) -
+    now it's caught at config time instead, matching the existing UX for
+    `jpeg_quality`.
+  - **Verified** with three scratch `esphome`/`esphome compile` runs: (1)
+    `rotation: 90` without a `psram:` block now fails config validation with
+    the new "Rotation requires the 'psram' component..." message; (2) the
+    same config with `framework: type: arduino` fails with ESPHome's own
+    P4/Arduino rejection (before our check runs, as expected); (3) the full
+    valid config (esp-idf, psram, rotation, mirror options) still compiles
+    successfully end-to-end. Scratch test directory removed afterward.
+  - Also updated `README.md`'s configuration table (`rotation` row) and
+    "Supported hardware" section to document the psram-for-rotation and
+    esp-idf-only requirements for future readers.

@@ -274,9 +274,26 @@ def _final_validate(config: ConfigType) -> None:
             f"the '{variant}' variant)"
         )
 
-    if config[CONF_JPEG_QUALITY] and psram_domain not in CORE.loaded_integrations:
+    # This component is built entirely on ESP-IDF-only APIs (esp_video/esp_cam_sensor managed
+    # components, driver/ppa.h, driver/jpeg_encode.h, esp_cache.h, ...); none of that exists under
+    # the Arduino framework. Without this check, picking Arduino here doesn't fail cleanly at
+    # config time - it fails deep in the build with a wall of unrelated-looking compiler/linker
+    # errors instead.
+    framework_type = esp32_conf.get("framework", {}).get("type")
+    if framework_type and framework_type != "esp-idf":
         raise cv.Invalid(
-            f"JPEG re-encoding requires the '{psram_domain}' component for buffer allocation"
+            f"mipi_csi_camera requires the 'esp-idf' framework, got '{framework_type}'"
+        )
+
+    # Rotation and (defensively) de-striding both allocate their working buffer with
+    # MALLOC_CAP_SPIRAM (see rotate_frame_()/destride_frame_() in mipi_csi_camera.cpp) - without
+    # PSRAM that allocation simply fails and the frame is sent unrotated, which is easy to miss
+    # in a busy boot log. JPEG re-encoding has the same requirement for its own buffers.
+    needs_psram = config[CONF_JPEG_QUALITY] or config[CONF_ROTATION]
+    if needs_psram and psram_domain not in CORE.loaded_integrations:
+        reason = "JPEG re-encoding" if config[CONF_JPEG_QUALITY] else "Rotation"
+        raise cv.Invalid(
+            f"{reason} requires the '{psram_domain}' component for buffer allocation"
         )
 
 
