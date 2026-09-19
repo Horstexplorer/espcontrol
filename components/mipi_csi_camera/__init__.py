@@ -183,6 +183,14 @@ def validate_jpeg_quality(config: ConfigType) -> ConfigType:
     quality = config.get(CONF_JPEG_QUALITY)
     if quality != 0 and (quality < 6 or quality > 63):
         raise cv.Invalid(f"jpeg_quality must be 0 (disabled) or between 6 and 63, got {quality}")
+    if quality != 0 and config[CONF_PIXEL_FORMAT] not in ISP_OUTPUT_FORMATS:
+        # The ESP32-P4's hardware JPEG encoder only accepts the ISP's processed output formats
+        # (RGB565/RGB888/YUV422/YUV420/GRAYSCALE); the sensor's native RAW8/RAW10 Bayer data has
+        # no direct JPEG source format to encode from.
+        raise cv.Invalid(
+            f"jpeg_quality requires an ISP output pixel_format ({sorted(ISP_OUTPUT_FORMATS)}); "
+            f"got '{config[CONF_PIXEL_FORMAT]}', which can't be JPEG-encoded directly"
+        )
     return config
 
 
@@ -266,11 +274,7 @@ def _final_validate(config: ConfigType) -> None:
             f"the '{variant}' variant)"
         )
 
-    if (
-        config[CONF_PIXEL_FORMAT] != "RAW8"
-        and config[CONF_JPEG_QUALITY]
-        and psram_domain not in CORE.loaded_integrations
-    ):
+    if config[CONF_JPEG_QUALITY] and psram_domain not in CORE.loaded_integrations:
         raise cv.Invalid(
             f"JPEG re-encoding requires the '{psram_domain}' component for buffer allocation"
         )

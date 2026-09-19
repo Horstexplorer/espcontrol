@@ -18,6 +18,7 @@
 #include "esphome/components/i2c/i2c_bus.h"
 
 #include "driver/ppa.h"
+#include "driver/jpeg_encode.h"
 
 namespace esphome::mipi_csi_camera {
 
@@ -179,6 +180,14 @@ class MipiCsiCamera final : public camera::Camera {
   /// Returns the original buffer untouched when rotation_ == 0.
   uint8_t *rotate_frame_(uint8_t *src, uint16_t width, uint16_t height, size_t frame_size, uint16_t *out_width,
                          uint16_t *out_height);
+  /// Re-encodes a captured (post-rotation) frame as JPEG using the ESP32-P4's hardware JPEG
+  /// encoder, so it can be displayed by Home Assistant/the API (which always treats camera image
+  /// bytes as JPEG). Only available for the ISP-produced formats the hardware encoder accepts
+  /// (RGB565/RGB888/YUV422/YUV420/GRAYSCALE) - RAW8/RAW10 can't be encoded directly. Returns
+  /// nullptr (falling back to sending the raw/rotated buffer as-is) if jpeg_quality is 0, the
+  /// pixel format isn't supported, or the encoder failed; the returned buffer (on success) is
+  /// heap_caps_free()-owned by the caller.
+  uint8_t *encode_jpeg_(const uint8_t *src, uint16_t width, uint16_t height, size_t src_size, size_t *out_size);
   size_t bytes_per_pixel_() const;
 
   /* configuration */
@@ -208,6 +217,7 @@ class MipiCsiCamera final : public camera::Camera {
   size_t capture_buffer_size_{0};
   bool streaming_{false};
   ppa_client_handle_t ppa_handle_{nullptr};
+  jpeg_encoder_handle_t jpeg_encoder_{nullptr};
   esp_err_t init_error_{0 /* ESP_OK */};
   const char *setup_failure_reason_{nullptr};
 
