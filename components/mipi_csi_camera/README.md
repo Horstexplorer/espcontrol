@@ -186,6 +186,25 @@ look for it under the ESPHome device's entities in Home Assistant
 (Settings → Devices & Services → Devices → your device) if it doesn't appear
 on a dashboard automatically.
 
+**Important:** set a `name:` on the `mipi_csi_camera:` block (in addition to
+or instead of `id:`). Like every other ESPHome entity, if only `id:` is
+given (no `name:`), ESPHome marks the entity **internal** by default -
+it will still work for `on_image`/lambdas, but it is hidden from the API
+entity list entirely, so it will never show up in Home Assistant no matter
+how `pixel_format`/`jpeg_quality` are configured. Setting `name: Camera` (or
+similar) makes it a normal, visible entity:
+
+```yaml
+mipi_csi_camera:
+  id: my_camera        # for lambdas/automations
+  name: Camera          # required for the entity to be visible in Home Assistant
+  sensor: OV02C10
+  resolution: 1288x728
+  data_lanes: 1
+  pixel_format: RGB565
+  jpeg_quality: 10
+```
+
 ## ISP throughput (RGB565/RGB888 at high resolution)
 
 Converting RAW Bayer data to RGB565/RGB888 in real time via the ESP32-P4's

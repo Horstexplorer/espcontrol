@@ -479,3 +479,34 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
       config`. Documented the Home Assistant JPEG requirement and a working
       example config in a new README section. Scratch test directories removed
       afterward.
+- 2026-09-19: **Camera entity still didn't appear in Home Assistant even
+  after the JPEG fix landed and was reflashed** (`Pixel Format: RGB565`,
+  `JPEG Re-encoding: quality 10 (enabled)` both confirmed present in the
+  dump_config output, no errors anywhere in the device log). Ruled out a
+  device-side crash/registration bug by enabling ESPHome integration debug
+  logging in Home Assistant (Settings → Devices & Services → ESPHome →
+  three-dot menu → Enable debug logging) and inspecting the raw
+  `aioesphomeapi` protocol trace: the device's `ListEntitiesDoneResponse`
+  arrived correctly, but **no `ListEntitiesCameraResponse` message was ever
+  sent** - meaning the entity itself was excluded from the API's entity list
+  on the device side, not merely mis-rendered by HA. Reproduced locally with
+  a scratch compile matching the user's exact `mipi_csi_camera:` block
+  (`id: my_camera`, no `name:`) and inspected the generated `main.cpp`: the
+  entity's `configure_entity_(...)` call included the internal-flag bit
+  (`// internal` in the generated comment) whenever only `id:` was set. This
+  is standard ESPHome behavior for *any* entity (not specific to this
+  component): an entity declared with only an `id:` (no `name:`) is treated
+  as an automation/lambda-only helper and is automatically marked
+  `internal: true`, which excludes it from `ListEntitiesIterator`
+  (`component_iterator.cpp`'s `on_camera()` guard: `!camera_instance->
+  is_internal() || include_internal_`) and therefore from the Home Assistant
+  entity list entirely - regardless of pixel format or JPEG settings. This
+  was not a bug in the component; it was a configuration gap in the example
+  YAML that never set an explicit `name:`. Verified the fix with a matching
+  scratch compile: adding `name: Camera` alongside `id: my_camera` changes
+  the generated `configure_entity_()` call's flags from the internal bit set
+  to `0` (visible). Updated the README's "Viewing the camera in Home
+  Assistant" section to state this requirement explicitly and adjusted the
+  example config to include both `id:` and `name:`. Scratch test directory
+  removed afterward. User to add `name:` to their device YAML, reflash, and
+  confirm the camera entity now appears in Home Assistant.
