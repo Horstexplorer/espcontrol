@@ -954,3 +954,47 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   default frame_buffer_count): compiled successfully. **Awaiting hardware
   retest** to confirm whether this fully resolves the tearing or whether a
   further timing issue remains.
+
+- **User retested with 1920x1080/1-lane (the vendor-proven combo) and the
+  bumped frame_buffer_count: tearing was unchanged in both regards**,
+  disproving both the register-table-timing hypothesis and the buffer-
+  starvation hypothesis - the artifact is resolution/lane/buffer-count
+  independent, meaning it's a bug in our own processing pipeline, not the
+  sensor or V4L2 buffer plumbing. The reported screenshot showed a sharp
+  horizontal seam: a coherent, correctly-colored image above it, and an
+  entirely unrelated-looking, differently-lit/differently-colored scene
+  below it - with `rotation: 0` (ruling out the PPA rotate path entirely).
+
+  - **Root-caused the real bug**: in `loop()`, `frame_size` (the size
+    trusted as "the valid captured frame", fed into RGB565 color-correction
+    and the JPEG encoder) was computed as `capture_buffer_size_` in the
+    common case where `destride_frame_()` is a no-op (driver's row stride
+    already matches the packed width - the normal case for RGB565 on this
+    hardware). `capture_buffer_size_` is `buf.length` from
+    `VIDIOC_QUERYBUF` - the V4L2 buffer's **allocated capacity** - not
+    necessarily equal to `width * height * bytes_per_pixel` for the
+    current frame. Any padding/rounding the driver applies when sizing
+    that allocation is *trailing bytes within the very same reused PSRAM
+    buffer* left over from whatever was previously written there (a prior
+    frame, at a prior resolution/rotation, or simply stale memory). Our
+    code fed all of `capture_buffer_size_` - real pixels *and* that
+    trailing stale region - into color correction and JPEG encoding as if
+    it were all valid image data, producing a frame that's correct up to
+    the real data boundary and garbled/unrelated beyond it. This explains
+    every piece of evidence: identical behavior across resolutions/lane
+    counts/buffer counts (the bug is in our own size accounting, not
+    capture timing), and no dependence on rotation (the bug is upstream of
+    `rotate_frame_()`).
+  - **Fix**: `frame_size` is now unconditionally `width * height *
+    bytes_per_pixel` (the exact size of a de-strided frame), regardless of
+    whether `destride_frame_()` performed a real copy or was a no-op.
+    `capture_buffer_size_` remains correctly used elsewhere (buffer
+    `munmap()` size, and the cache-invalidate range, where using the full
+    allocated capacity is safe/conservative rather than wrong).
+  - Verified via a scratch `esphome compile` (OV02C10, RGB565, 1920x1080,
+    1 lane, rotation 0, matching the user's exact failing config): compiled
+    successfully. **Awaiting hardware retest** - this is the most direct,
+    concrete explanation found so far for the persistent tearing, and
+    unlike the two previous fixes it explains why changing resolution/lanes
+    and buffer count had no effect.
+

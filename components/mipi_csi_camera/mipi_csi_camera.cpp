@@ -683,8 +683,16 @@ void MipiCsiCamera::loop() {
   // already matches), since rotation/JPEG-encoding/raw pass-through all assume that layout.
   uint8_t *destrided = this->destride_frame_(raw, this->width_, this->height_);
   bool destride_owned = destrided != raw;
+  // The valid image is always exactly width * height * bytes-per-pixel once de-strided - never
+  // `capture_buffer_size_` (the *allocated* V4L2 buffer capacity), which the driver is free to
+  // round up/pad beyond the real per-frame data. Using the allocated capacity here previously
+  // meant the trailing padding - stale bytes left over from a *previous* capture into the same
+  // reused buffer - was fed into color-correction/JPEG-encoding as if it were real pixels,
+  // producing a frame that looks correct up to the real data boundary and garbled/unrelated
+  // beyond it (independent of resolution, lane count, or buffer count, since the bug was in how
+  // much of the buffer we trusted, not in how the frame was captured).
   size_t packed_size = static_cast<size_t>(this->width_) * this->height_ * this->bytes_per_pixel_();
-  size_t frame_size = destride_owned ? packed_size : this->capture_buffer_size_;
+  size_t frame_size = packed_size;
 
   uint8_t *frame_data =
       this->rotate_frame_(destrided, this->width_, this->height_, frame_size, &out_width, &out_height);
