@@ -1252,3 +1252,12 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   remain link-marginal on paper, so 2-lane 1920x1080 stays the
   recommended config regardless.
 
+- Follow-up: user requested going straight to the newest esp_video
+  instead, so the pin is now `~2.5.0` (2.5.0 is the latest release;
+  nothing newer exists yet). This additionally pulls esp_cam_sensor
+  2.6.0 + esp_ipa 2.4.0. Vendored OV02C10 driver still compiles unchanged
+  against the 2.6 API (verified via scratch `esphome compile`, same
+  config as above). If any regression shows up on hardware, falling back
+  to `~2.4.1` (which also contains the FIFO-overflow fix) is a one-line
+  change.
+

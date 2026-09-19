@@ -359,9 +359,10 @@ async def to_code(config: ConfigType) -> None:
     # frames, and eventually an interrupt-WDT crash from the error-interrupt
     # spam). 2.3.0 derives the ISP clock from clk_src (up to 240MHz) instead;
     # 2.4.1 additionally fixes ISP/MIPI-CSI driver compatibility on the
-    # ESP-IDF 5.5.x line that ESPHome uses. See dev-docs/mipi-csi-camera-plan.md.
-    add_idf_component(name="espressif/esp_video", ref="~2.4.1")
-    add_idf_component(name="espressif/esp_cam_sensor", ref="~2.4.0")
+    # ESP-IDF 5.5.x line that ESPHome uses. We pin 2.5.0 (the latest release,
+    # which includes all of the above). See dev-docs/mipi-csi-camera-plan.md.
+    add_idf_component(name="espressif/esp_video", ref="~2.5.0")
+    add_idf_component(name="espressif/esp_cam_sensor", ref="~2.6.0")
 
     add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE", True)
     add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE", True)
