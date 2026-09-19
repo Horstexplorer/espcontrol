@@ -22,6 +22,8 @@
 
 namespace esphome::mipi_csi_camera {
 
+class SensorExtension;
+
 /// Camera sensors that the vendored `esp_cam_sensor` drivers support and
 /// that this component is validated against.
 enum MipiCsiSensorModel : uint8_t {
@@ -232,6 +234,10 @@ class MipiCsiCamera final : public camera::Camera {
   jpeg_encoder_handle_t jpeg_encoder_{nullptr};
   esp_err_t init_error_{0 /* ESP_OK */};
   const char *setup_failure_reason_{nullptr};
+  /// Optional sensor-specific hook (see mipi_csi_camera_sensor_extension.h); nullptr for sensors
+  /// fully handled by Espressif's `esp_cam_sensor` managed component (SC2336/OV5647). Set once in
+  /// setup(), never reassigned afterwards.
+  SensorExtension *sensor_extension_{nullptr};
 
   std::shared_ptr<MipiCsiCameraImage> current_image_;
   std::atomic<uint8_t> single_requesters_{0};

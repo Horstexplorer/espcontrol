@@ -24,7 +24,7 @@
 #include "esp_video_device.h"
 #include "linux/videodev2.h"
 
-#include "ov02c10_esphome.h"
+#include "mipi_csi_camera_sensor_extension.h"
 
 namespace esphome::mipi_csi_camera {
 
@@ -109,10 +109,12 @@ size_t MipiCsiCamera::bytes_per_pixel_() const {
 /* ---------------- setup ---------------- */
 
 void MipiCsiCamera::setup() {
-  if (this->sensor_model_ == MIPI_CSI_SENSOR_OV02C10) {
-    // See ov02c10_esphome.h: forces the linker to keep the vendored ov02c10.c driver, which
-    // would otherwise be silently dropped as unused.
-    ov02c10::force_link();
+  this->sensor_extension_ = get_sensor_extension(this->sensor_model_);
+  if (this->sensor_extension_ != nullptr) {
+    // Sensors vendored directly into this component (not part of Espressif's `esp_cam_sensor`
+    // managed registry) need an explicit linker keep-alive; see
+    // mipi_csi_camera_sensor_extension.h.
+    this->sensor_extension_->force_link();
   }
 
   // SCCB always reuses the already-configured ESPHome `i2c:` bus (see
@@ -666,15 +668,17 @@ void MipiCsiCamera::loop() {
   bool rotated_copy = frame_data != raw;
 
   // The ISP's automatic 3A pipeline (auto exposure/gain/white balance) needs per-sensor
-  // calibration data that doesn't exist for the OV02C10 (it isn't in Espressif's official
-  // esp_cam_sensor registry), so it isn't enabled here - see dev-docs/mipi-csi-camera-plan.md for
-  // why enabling it made the image worse, not better. Without it, the ISP's plain demosaic output
-  // has a visible green cast (Bayer's 2x green sample density) that a fixed gentle software gain
-  // correction on the RGB565 channels reduces, mirroring the same workaround used by other
-  // community OV02C10/ESP32-P4 camera projects. This correction is tuned specifically for the
-  // OV02C10 (see sensors/ov02c10/ov02c10_esphome.cpp); other sensors don't need it.
-  if (this->sensor_model_ == MIPI_CSI_SENSOR_OV02C10 && this->pixel_format_ == MIPI_CSI_PIXEL_FORMAT_RGB565) {
-    ov02c10::apply_rgb565_color_correction(reinterpret_cast<uint16_t *>(frame_data), frame_size / 2);
+  // calibration data that some sensors (e.g. OV02C10) don't have (it isn't in Espressif's
+  // official esp_cam_sensor registry), so it isn't enabled here - see
+  // dev-docs/mipi-csi-camera-plan.md for why enabling it made the image worse, not better.
+  // Without it, the ISP's plain demosaic output can have a visible green cast (Bayer's 2x green
+  // sample density); sensor extensions that need a correction for this hook in here via
+  // apply_rgb565_color_correction() (see mipi_csi_camera_sensor_extension.h). Sensors that don't
+  // need one (get_sensor_extension() returned nullptr, or their extension leaves the default
+  // no-op) are unaffected.
+  if (this->sensor_extension_ != nullptr && this->pixel_format_ == MIPI_CSI_PIXEL_FORMAT_RGB565) {
+    this->sensor_extension_->apply_rgb565_color_correction(reinterpret_cast<uint16_t *>(frame_data),
+                                                             frame_size / 2);
   }
 
   uint8_t requesters = single | stream;

@@ -800,3 +800,89 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   - Also updated `README.md`'s configuration table (`rotation` row) and
     "Supported hardware" section to document the psram-for-rotation and
     esp-idf-only requirements for future readers.
+- 2026-09-19 (later): Refactored the sensor-specific code into a real plugin
+  architecture, consolidated OV02C10's per-mode register files, and
+  cross-checked our OV02C10 handling against two external references
+  ([intel/ipu6-drivers](https://github.com/intel/ipu6-drivers)'s Linux
+  `ov02c10.c`, and
+  [sullb/esphome-p4-csi-camera](https://github.com/sullb/esphome-p4-csi-camera)'s
+  `ov02c10_settings.h`), per the user's request.
+  - **New `SensorExtension` interface**
+    (`mipi_csi_camera_sensor_extension.h`): a small virtual interface
+    (`force_link()`, `apply_rgb565_color_correction()`) that sensors vendored
+    outside the `esp_cam_sensor` registry implement to hook into
+    `setup()`/`loop()`. `sensor_extensions.cpp` is the single touch point
+    that maps `MipiCsiSensorModel` -> `SensorExtension*` (returns `nullptr`
+    for SC2336/OV5647, which don't need one). `mipi_csi_camera.cpp`/`.h` no
+    longer contain any `if (sensor_model_ == MIPI_CSI_SENSOR_OV02C10)`
+    special-casing at all - they just call through
+    `this->sensor_extension_` (cached once in `setup()`) when it's non-null.
+    Adding a future vendored sensor now means: add its `<name>_*` driver
+    files, implement `SensorExtension` for it (see `ov02c10_esphome.h`/`.cpp`
+    for the reference shape, now `class Ov02c10Extension final : public
+    SensorExtension`), and add one `case` to `get_sensor_extension()` -
+    nothing else in the generic driver changes.
+  - **Consolidated OV02C10's three per-mode register header files**
+    (`ov02c10_mipi_1lane_24Minput_1288x728_raw10_30fps.h`,
+    `..._1lane_24Minput_1920x1080_...`, `..._2lane_24Minput_1920x1080_...`)
+    into the single `ov02c10_settings.h`, matching the structure
+    `sullb/esphome-p4-csi-camera` uses for the same driver (one
+    `ov02c10_settings.h` holding every mode's register array, rather than one
+    file per mode) - per the user's explicit request ("we dont need multiple
+    dedicated configuration options files"). Verified byte-for-byte
+    completeness by counting `{0x...` register-entry lines before/after
+    (226 entries x 3 modes = 678, matched exactly) before deleting the three
+    old files.
+  - **Found and fixed a real, previously-untested bug** while verifying the
+    refactor: `ov02c10.c` is always compiled by ESPHome regardless of which
+    `sensor:` is selected (nothing gates the whole file on `sensor ==
+    OV02C10`), but `__init__.py` only ever supplied
+    `CONFIG_CAMERA_OV02C10_MIPI_IF_FORMAT_INDEX_DEFAULT` as a build flag when
+    OV02C10 was selected - so selecting `SC2336` or `OV5647` failed to
+    *compile* at all (`'CONFIG_CAMERA_OV02C10_MIPI_IF_FORMAT_INDEX_DEFAULT'
+    undeclared`). This had apparently never been scratch-compiled before
+    (all prior scratch tests in this project used OV02C10). Fixed with a
+    `#ifndef`-guarded fallback default (`0`) in `ov02c10_compat.h`; harmless
+    when unused since none of the `CONFIG_CAMERA_OV02C10_MIPI_RAW10_*` mode
+    macros are defined either in that case, so
+    `ov02c10_mipi_format_index[]` is simply empty.
+  - **Cross-checked against `intel/ipu6-drivers`'s `ov02c10.c`** (the Linux
+    kernel/IPU6 driver for the same sensor, used on Intel platforms):
+    confirms the same register semantics we already use (`0x0100`
+    standby/streaming toggle, `0x3508`/`0x350a` analog/digital gain,
+    `0x3501`/`0x3502` exposure, `0x380c-0x380f` HTS/VTS) and the same
+    stream-start/stop sequence pattern (`REG_MODE_SELECT` write last after
+    programming a mode, standby write first when stopping) that
+    `ov02c10_set_stream()` in our vendored `ov02c10.c` already implements -
+    no discrepancy found, so no changes made there. Also noted the Intel
+    driver's `OV02C10_REG_TEST_PATTERN` (`0x4503`, bit 7) - a built-in test
+    pattern generator that could help distinguish a genuine sensor/CSI
+    problem from a downstream (ISP/rotation/JPEG) processing bug in the
+    future, but wasn't added as a user-facing option in this pass since it
+    wasn't asked for and the current image-quality issues already have an
+    identified, unrelated root cause (ISP demosaic, addressed by the color
+    correction above) - noted here as a candidate future diagnostic aid
+    instead.
+  - **Cross-checked against `sullb/esphome-p4-csi-camera`'s
+    `ov02c10_settings.h`**: byte-for-byte identical register tables to ours
+    (same Espressif-authored driver), confirming our consolidation approach
+    (one settings file, register tables selected via the same
+    `CONFIG_CAMERA_OV02C10_MIPI_RAW10_*`-style build flags) matches how an
+    independent implementation for the same sensor already organizes this.
+    No additional settings/power-mode knobs were found there beyond what our
+    driver already exposes (gain/exposure/mirror/flip via V4L2 controls,
+    mode-table-driven resolution/framerate).
+  - **Verified** with three scratch `esphome compile` runs: OV02C10 (with
+    `horizontal_mirror`/`vertical_flip`/`rotation` all set, to exercise the
+    color-correction and sensor-extension force-link path) compiled and
+    linked successfully; SC2336 (exercising the `nullptr` sensor-extension
+    path, and the just-fixed compile bug) failed before the
+    `ov02c10_compat.h` fix and compiled successfully after it. Scratch test
+    directory removed afterward.
+  - Updated `README.md`: new "Adding another sensor" section describing the
+    `SensorExtension` extension point, updated "How it works"/"OV02C10 color
+    correction"/"Attribution" sections to reference the new
+    `Ov02c10Extension`/`sensor_extensions.cpp` names instead of the old
+    free-function `ov02c10::force_link()`/`ov02c10::apply_rgb565_color_correction()`,
+    and updated the per-mode-file mentions to reflect the single
+    `ov02c10_settings.h`.
