@@ -998,3 +998,75 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
     unlike the two previous fixes it explains why changing resolution/lanes
     and buffer count had no effect.
 
+- **User retested the `frame_size` fix: still corrupted**, though the new
+  screenshot showed a different-looking variant of the same problem class:
+  a correct/recognizable top portion, then several repeated bands showing
+  the *same* scene content again with progressively worse color drift, and
+  finally the bottom of the frame degenerating into high-contrast
+  blocky/speckled noise. Ruling out yet another theory required two
+  separate investigations:
+
+  - **Hardware/signal-integrity check**: had the user flash the vendor's
+    own unmodified `video_lcd_display` example (from
+    `JC8012P4A1C_I_W_Y_New_Panel`) onto the same physical device. Its
+    camera preview showed **no tearing at all** - conclusively ruling out
+    a hardware problem (bad FPC cable, camera module defect, insufficient
+    LDO sequencing, MIPI signal integrity) and confirming the bug is
+    somewhere in our own software.
+  - **Init/config cross-check**: dispatched a background research pass
+    comparing our `setup()`/`configure_format_()`/ISP/CSI-PHY
+    configuration against the vendor's `app_video.c` line-by-line
+    (`esp_video_init_csi_config_t` fields, ISP enablement, `esp_cam_ctlr`
+    settings, buffer memory mode, stream-start ordering,
+    `ov02c10_isp_info_mipi[1]` metadata for the exact mode used). Result:
+    no meaningful difference found. The one flagged difference
+    (`CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER` off in our build,
+    on in the vendor's) turned out to be the ISP's *auto-exposure/AWB 3A
+    control loop* (esp_ipa) - a feature we deliberately left disabled
+    already (documented in `loop()`'s comments: enabling it made images
+    worse, not better, since this sensor lacks the calibration data that
+    algorithm needs). Not a bug, and unrelated to the corruption.
+
+  - **New root cause found**: our `capture_task()`/`loop()` pipeline was
+    discarding a critical piece of information the V4L2 driver provides on
+    every dequeue - `struct v4l2_buffer`'s `bytesused` field, the *actual*
+    number of valid bytes the CSI/ISP DMA wrote for that specific captured
+    frame. We only ever threaded the buffer *index* through
+    `frame_queue_`, then unconditionally assumed the whole
+    `width * height * bytes_per_pixel` region was valid (this is exactly
+    what the previous `frame_size` fix hard-coded). If the CSI receiver
+    ever only manages to write *part* of a frame during a given capture
+    cycle (a dropped/short line group, a synchronization hiccup, an ISP
+    stall) - which the vendor's simpler/slower unthrottled capture loop
+    may simply never trigger, or triggers rarely enough that it wasn't
+    reported as visible tearing - then everything past the real
+    `bytesused` boundary in that (reused) buffer is stale leftover pixel
+    data from a *previous* capture into the same buffer, not fresh data.
+    Encoding that stale tail as if it were valid image content produces
+    exactly the observed pattern: a correct region, followed by
+    recognizable-but-wrong repeated content (stale previous frame(s)),
+    followed by effectively random noise (long-uninitialized/very old
+    buffer content) - independent of resolution, lane count, rotation, or
+    buffer count, since none of those change whether a given capture cycle
+    was complete.
+  - **Fix**: `capture_task()` now threads a small `CapturedFrame{index,
+    bytesused}` struct through `frame_queue_` instead of a bare buffer
+    index. `loop()` compares the driver-reported `bytesused` against the
+    expected `packed_size` (`width * height * bytes_per_pixel`): if
+    `bytesused` is non-zero and smaller than expected, the frame is a
+    confirmed short/partial capture - it's dropped outright (buffer
+    immediately requeued to the driver) rather than encoding known-corrupt
+    data into a JPEG and sending it to Home Assistant. A `ESP_LOGW` logs
+    every dropped frame with both byte counts, and a `ESP_LOGD` logs any
+    other bytesused/expected-size mismatch, so hardware testing will now
+    produce direct log evidence either confirming or ruling out this
+    theory, rather than more guesswork from screenshots alone.
+  - Verified via a scratch `esphome compile` (OV02C10, RGB565, 1920x1080,
+    1 lane): compiled successfully. **Awaiting hardware retest** with log
+    capture - if `ESP_LOGW "Dropping short frame"` messages appear
+    correlated with corrupted-looking frames, this confirms the theory;
+    if frames are never reported short yet corruption persists, the next
+    step is instrumenting a raw (non-JPEG, pre-ISP) Bayer dump for
+    byte-level inspection off-device, decoupling the diagnosis from
+    Home Assistant's rendering entirely.
+

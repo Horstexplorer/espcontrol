@@ -171,6 +171,15 @@ class MipiCsiCamera final : public camera::Camera {
   void stop_stream(camera::CameraRequester requester) override;
 
  protected:
+  /// Item passed from capture_task() to loop() through frame_queue_. Carries the V4L2-reported
+  /// `bytesused` alongside the buffer index so loop() can detect a short/partial capture (the
+  /// driver wrote fewer valid bytes than a full frame) instead of blindly trusting that the whole
+  /// buffer holds fresh image data - see the frame_size handling in loop() for why this matters.
+  struct CapturedFrame {
+    int index;
+    size_t bytesused;
+  };
+
   static void capture_task(void *param);
   bool open_device_();
   bool configure_format_();

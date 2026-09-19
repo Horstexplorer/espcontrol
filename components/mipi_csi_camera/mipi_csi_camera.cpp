@@ -187,7 +187,7 @@ void MipiCsiCamera::setup() {
     }
   }
 
-  this->frame_queue_ = xQueueCreate(1, sizeof(int));
+  this->frame_queue_ = xQueueCreate(1, sizeof(CapturedFrame));
   this->start_capture_();
 
   xTaskCreatePinnedToCore(&MipiCsiCamera::capture_task, "mipi_csi_cam", CAPTURE_TASK_STACK_SIZE, this,
@@ -419,16 +419,16 @@ void MipiCsiCamera::capture_task(void *param) {
     // Overwrite any previously captured-but-unconsumed frame index; we only
     // ever care about the newest frame, mirroring ESP32Camera's single-slot
     // framebuffer queue behaviour.
-    int index = static_cast<int>(buf.index);
-    int previous_index;
-    if (xQueueReceive(self->frame_queue_, &previous_index, 0) == pdTRUE) {
+    CapturedFrame frame{static_cast<int>(buf.index), static_cast<size_t>(buf.bytesused)};
+    CapturedFrame previous_frame;
+    if (xQueueReceive(self->frame_queue_, &previous_frame, 0) == pdTRUE) {
       struct v4l2_buffer requeue{};
       requeue.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
       requeue.memory = V4L2_MEMORY_MMAP;
-      requeue.index = previous_index;
+      requeue.index = previous_frame.index;
       ioctl(self->video_fd_, VIDIOC_QBUF, &requeue);
     }
-    xQueueSend(self->frame_queue_, &index, 0);
+    xQueueSend(self->frame_queue_, &frame, 0);
   }
 
   self->capture_task_stopped_.store(true, std::memory_order_relaxed);
@@ -660,9 +660,10 @@ void MipiCsiCamera::loop() {
   if (single == 0 && stream == 0)
     return;
 
-  int index;
-  if (xQueueReceive(this->frame_queue_, &index, 0) != pdTRUE)
+  CapturedFrame frame;
+  if (xQueueReceive(this->frame_queue_, &frame, 0) != pdTRUE)
     return;
+  int index = frame.index;
 
   uint8_t *raw = this->capture_buffers_[index];
 
@@ -674,6 +675,32 @@ void MipiCsiCamera::loop() {
   esp_err_t cache_err = esp_cache_msync(raw, this->capture_buffer_size_, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
   if (cache_err != ESP_OK) {
     ESP_LOGW(TAG, "Cache invalidate of captured frame failed: %s", esp_err_to_name(cache_err));
+  }
+
+  size_t packed_size = static_cast<size_t>(this->width_) * this->height_ * this->bytes_per_pixel_();
+
+  // The V4L2 driver reports the *actual* number of valid bytes it wrote for this specific
+  // capture in `bytesused`. If the CSI receiver ever only manages to write part of a frame
+  // (e.g. a dropped/short line group, an ISP hiccup, or the receiver losing synchronization
+  // partway through), `bytesused` will be smaller than a full `packed_size` frame - and
+  // everything past that point in the buffer is stale leftover content from whatever was
+  // captured into it previously, not real image data. Encoding that stale tail as if it were
+  // valid pixels produces exactly a "correct top, garbled/unrelated bottom" frame, independent
+  // of resolution, lane count, rotation, or buffer count - matching every symptom reported so
+  // far. Detect this and drop the frame outright rather than sending known-corrupt output.
+  if (frame.bytesused != 0 && frame.bytesused < packed_size) {
+    ESP_LOGW(TAG, "Dropping short frame: driver reported only %u of %u expected bytes (buf %d)",
+             static_cast<unsigned>(frame.bytesused), static_cast<unsigned>(packed_size), index);
+    struct v4l2_buffer buf{};
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    buf.index = index;
+    ioctl(this->video_fd_, VIDIOC_QBUF, &buf);
+    return;
+  }
+  if (frame.bytesused != 0 && frame.bytesused != packed_size) {
+    ESP_LOGD(TAG, "Frame buf %d: driver reported %u bytes (expected %u)", index,
+             static_cast<unsigned>(frame.bytesused), static_cast<unsigned>(packed_size));
   }
 
   uint16_t out_width = this->width_;
@@ -691,7 +718,6 @@ void MipiCsiCamera::loop() {
   // producing a frame that looks correct up to the real data boundary and garbled/unrelated
   // beyond it (independent of resolution, lane count, or buffer count, since the bug was in how
   // much of the buffer we trusted, not in how the frame was captured).
-  size_t packed_size = static_cast<size_t>(this->width_) * this->height_ * this->bytes_per_pixel_();
   size_t frame_size = packed_size;
 
   uint8_t *frame_data =
