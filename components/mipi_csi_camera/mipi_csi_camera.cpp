@@ -32,6 +32,34 @@ static const char *const TAG = "mipi_csi_camera";
 static constexpr size_t CAPTURE_TASK_STACK_SIZE = 4096;
 static constexpr UBaseType_t CAPTURE_TASK_PRIORITY = 4;
 
+// esp_cache_msync's M2C (invalidate) direction wraps the *entire* requested range in a single
+// interrupt-disabled critical section (unlike its C2M/writeback direction, which ESP-IDF can
+// optionally chunk via CONFIG_ESP_MM_CACHE_MSYNC_C2M_CHUNKED_OPS - a knob that doesn't exist for
+// M2C). For a full-resolution frame (e.g. ~4MB at 1920x1080 RGB565) that single critical section
+// can run long enough to trip the interrupt watchdog outright (observed on hardware: a hard
+// crash - "Interrupt wdt timeout on CPU1" - immediately after switching from 1288x728 to
+// 1920x1080), and even when it doesn't cross that hard limit, it still blocks every other
+// interrupt (including whatever signals the CSI/ISP DMA engine that a buffer is free to reuse)
+// for the whole invalidate, which is a very plausible contributor to the frame tearing seen at
+// every resolution. Invalidate in bounded-size chunks instead, so each individual critical
+// section is short and interrupts get serviced between chunks.
+static constexpr size_t CACHE_INVALIDATE_CHUNK_SIZE = 32 * 1024;
+
+static void invalidate_cache_chunked(void *addr, size_t size) {
+  auto *cursor = static_cast<uint8_t *>(addr);
+  size_t remaining = size;
+  while (remaining > 0) {
+    size_t chunk = std::min(remaining, CACHE_INVALIDATE_CHUNK_SIZE);
+    esp_err_t err = esp_cache_msync(cursor, chunk, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Cache invalidate chunk failed: %s", esp_err_to_name(err));
+      break;
+    }
+    cursor += chunk;
+    remaining -= chunk;
+  }
+}
+
 
 static const char *sensor_model_to_str(MipiCsiSensorModel model) {
   switch (model) {
@@ -541,7 +569,7 @@ uint8_t *MipiCsiCamera::rotate_frame_(uint8_t *src, uint16_t width, uint16_t hei
   // The PPA writes to `dest` via DMA, which does not automatically keep the CPU data cache coherent
   // for PSRAM. Invalidate the CPU cache for the written range so subsequent reads (JPEG encoding or
   // sending the raw frame to listeners) see the PPA's output rather than stale/uninitialized cache lines.
-  esp_cache_msync(dest, aligned_size, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+  invalidate_cache_chunked(dest, aligned_size);
 
   return dest;
 }
@@ -671,11 +699,10 @@ void MipiCsiCamera::loop() {
   // automatically visible to the CPU data cache. Without invalidating the cache here, reads
   // below can return a mix of the fresh DMA'd bytes and stale previously-cached bytes,
   // producing exactly the kind of torn/shifted frames with per-frame color drift seen on
-  // hardware. Invalidate (memory -> cache) before touching the buffer at all.
-  esp_err_t cache_err = esp_cache_msync(raw, this->capture_buffer_size_, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
-  if (cache_err != ESP_OK) {
-    ESP_LOGW(TAG, "Cache invalidate of captured frame failed: %s", esp_err_to_name(cache_err));
-  }
+  // hardware. Invalidate (memory -> cache) before touching the buffer at all. Chunked (see
+  // invalidate_cache_chunked() above) since a single-shot invalidate of a full-resolution frame
+  // both risks tripping the interrupt watchdog and blocks other interrupts for its whole duration.
+  invalidate_cache_chunked(raw, this->capture_buffer_size_);
 
   size_t packed_size = static_cast<size_t>(this->width_) * this->height_ * this->bytes_per_pixel_();
 

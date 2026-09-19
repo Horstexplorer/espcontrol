@@ -1070,3 +1070,53 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
     byte-level inspection off-device, decoupling the diagnosis from
     Home Assistant's rendering entirely.
 
+- Hardware retest of the `bytesused` fix was inconclusive: the provided
+  log showed no `"Dropping short frame"` messages, but also no evidence
+  the camera was actually viewed/streamed during that capture window, so
+  the theory was neither confirmed nor refuted.
+- However, the same retest surfaced a new, more serious, and clearly
+  resolution-dependent bug: immediately after flashing 1920x1080, the
+  device hit `Guru Meditation Error: Core 1 panic'ed (Interrupt wdt
+  timeout on CPU1)` on boot, requiring two automatic reboots before
+  settling into a previous (1288x728) build. The user confirmed reverting
+  to 1288x728 avoids the crash entirely, and that after reverting there is
+  still no `"Dropping short frame"` log line - meaning the earlier
+  "1920x1080 shows no improvement" test was likely never actually
+  exercising a running 1920x1080 build in the first place.
+- Root cause found by reading ESP-IDF's actual
+  `components/esp_mm/esp_cache_msync.c`: for the **M2C** (invalidate)
+  direction - exactly what our `loop()` uses on the raw captured buffer,
+  and what `rotate_frame_()` uses on the PPA output buffer - the entire
+  requested range is invalidated inside a single, unchunked critical
+  section with interrupts disabled for the whole call
+  (`esp_os_enter_critical_safe` / `cache_hal_invalidate_addr` /
+  `esp_os_exit_critical_safe`). ESP-IDF does provide a chunking mitigation
+  for exactly this problem (`CONFIG_ESP_MM_CACHE_MSYNC_C2M_CHUNKED_OPS`),
+  but it **only applies to the C2M (writeback) direction** - there is no
+  equivalent for M2C. At 1920x1080 RGB565 (~4.1MB) vs 1288x728 RGB565
+  (~1.9MB), the interrupt-disabled window scales with buffer size; 1920x1080
+  apparently crosses the interrupt watchdog's threshold outright, while
+  1288x728 stays under it but could still be long enough to delay the
+  CSI/ISP driver's own interrupt-driven buffer handoff - a very plausible
+  explanation for the "correct top, repeated/color-shifting middle bands,
+  noisy bottom" pattern seen at every resolution tested so far, since it is
+  driven by total buffer size rather than resolution, lane count, rotation,
+  or buffer count (all previously ruled out).
+- **Fix implemented**: added a small `invalidate_cache_chunked()` helper in
+  `mipi_csi_camera.cpp` that loops `esp_cache_msync(..., ESP_CACHE_MSYNC_FLAG_DIR_M2C)`
+  over fixed 32 KB chunks instead of invalidating the whole buffer in one
+  call, keeping each individual critical section short so interrupts get
+  serviced between chunks. Both M2C invalidate call sites now use it: the
+  raw captured-frame invalidate in `loop()`, and the PPA rotate-output
+  invalidate in `rotate_frame_()`. (Chunk starts/sizes stay cache-line
+  aligned automatically: the original buffers were already validated as
+  aligned when a single unchunked call worked, and 32 KB is itself a
+  multiple of any realistic cache line size, so every chunk - including the
+  final, possibly-shorter one - remains a multiple of the cache line size.)
+  Verified via a scratch `esphome compile` (OV02C10, RGB565, 1920x1080, 1
+  lane): compiled successfully. **Awaiting hardware retest** on both
+  1920x1080 (does the boot-time WDT crash disappear?) and 1288x728 (does
+  the visual tearing improve or disappear?), with logs specifically
+  checked for `"Dropping short frame"` warnings and for any repeat of the
+  WDT panic.
+
