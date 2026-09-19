@@ -928,3 +928,29 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
     genuine capture-buffer-count/timing issue, but the missing invalidate on
     the raw DMA buffer was the most direct explanation for the reported
     symptom and had not been checked before.
+
+- **Follow-up: raised the default `frame_buffer_count` from 2 to 3 (max
+  raised from 3 to 4)**: after the cache-invalidate fix, the user reported
+  the tearing was less frequent/severe but still present - a screenshot
+  showed a frame apparently spliced from two temporally different captures
+  (a distinct horizontal seam with a different color cast above vs. below
+  it, not just row noise). Re-reviewing `capture_task()`/`loop()`'s
+  buffer-ownership handling found a second, independent bug: with only 2
+  total V4L2 buffers, the worst case has **both** buffers held outside the
+  driver's free-list at the same time - one sitting consumed-but-unread in
+  the single-slot `frame_queue_`, and one actively being read by `loop()`
+  after being pulled off that queue (destride/rotate/JPEG-encode can take
+  a while) - leaving **zero** buffers free for the CSI/ISP DMA engine to
+  capture the next frame into. Depending on how gracefully the underlying
+  esp_video/CSI driver handles buffer starvation, it may keep writing into
+  a buffer anyway even though it's still logically "checked out", tearing a
+  frame that's mid-read - a plausible explanation for the two-different-
+  captures-spliced-together artifact. With 3 buffers there is always at
+  least one free for capture (1 in-queue + 1 being processed + 1 free).
+  Bumped the default from 2 to 3 and the allowed range from `2-3` to `2-4`
+  (kept 2 available for memory-constrained setups, with a new runtime
+  `ESP_LOGW` warning when configured below 3 explaining the tearing risk).
+  Verified via a scratch `esphome compile` (OV02C10, RGB565, rotation 90,
+  default frame_buffer_count): compiled successfully. **Awaiting hardware
+  retest** to confirm whether this fully resolves the tearing or whether a
+  further timing issue remains.

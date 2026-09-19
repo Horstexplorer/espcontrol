@@ -102,7 +102,7 @@ mipi_csi_camera:
 | `vertical_flip`        | no       | `false` | Flips the image vertically (`V4L2_CID_VFLIP`).                              |
 | `contrast`/`brightness`/`saturation` | no | `0` | `-2` to `2`, forwarded to the sensor if supported.               |
 | `jpeg_quality`         | no       | `0`     | `0` disables JPEG re-encoding; `6`-`63` re-encodes the ISP's output (RGB565/RGB888/YUV422/YUV420/GRAYSCALE only, using the ESP32-P4's hardware JPEG encoder) so it can be viewed in Home Assistant/the API. Lower numbers mean higher quality (same inverted scale as `esp32_camera`'s `jpeg_quality`). Requires an `psram:` component; not valid with `RAW8`/`RAW10`. |
-| `frame_buffer_count`   | no       | `2`     | Number of V4L2 capture buffers (2-3).                                       |
+| `frame_buffer_count`   | no       | `3`     | Number of V4L2 capture buffers (2-4). 3+ is strongly recommended: with only 2, `capture_task()`/`loop()` can end up holding both buffers outside the driver's free-list simultaneously (one queued-but-unread, one actively being processed), leaving none free for the CSI/ISP DMA engine - some drivers then overwrite a buffer while it's still being read, producing torn/split-color frames. |
 | `init_ldo`             | no       | `true`  | Whether this component should power the shared MIPI PHY LDO regulator (channel 3, 2.5V on the ESP32-P4). Set to `false` if an `esp_ldo:` component elsewhere in your config (typically for the MIPI-DSI display) already powers that same channel — acquiring it twice fails with `esp_ldo_acquire_channel(...): can't acquire the channel, already in use by others or not adjustable`. |
 
 Automations: `on_image` (`CameraImageData image` with `data`/`length`),
