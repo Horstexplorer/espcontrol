@@ -340,6 +340,14 @@ async def to_code(config: ConfigType) -> None:
 
     add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE", True)
     add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE", True)
+    # Without the ISP pipeline controller, the ISP only performs a "dumb" demosaic: no auto
+    # exposure/gain, no auto white balance, no color correction. That produces a very dark,
+    # heavily noise-banded, green-tinted image (the raw Bayer sensor's green-dominant channel
+    # count shows through uncorrected) - this is a known Espressif esp_video default
+    # (CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER defaults to `n`). Enabling it spins up
+    # the esp_ipa-driven "isp_task" that continuously reads ISP statistics and applies AWB/AGC/
+    # AEC/color-correction, which is required for a usable picture.
+    add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER", True)
     add_idf_sdkconfig_option("CONFIG_CAMERA_SC2336", config[CONF_SENSOR] == "SC2336")
     add_idf_sdkconfig_option("CONFIG_CAMERA_OV5647", config[CONF_SENSOR] == "OV5647")
 

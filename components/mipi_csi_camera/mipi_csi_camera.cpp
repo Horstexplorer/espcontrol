@@ -227,6 +227,20 @@ bool MipiCsiCamera::configure_format_() {
     return false;
   }
 
+  // VIDIOC_S_FMT is a read/write ioctl: the driver writes back the *actual* negotiated format,
+  // including `bytesperline` (the per-row stride, which the CSI/ISP pipeline may pad to an
+  // alignment boundary and which can therefore be larger than width * bytes-per-pixel). Frames
+  // are de-strided in destride_frame_() before use, so every other stage (PPA rotation, JPEG
+  // encoding, raw pass-through) can keep assuming tightly-packed rows.
+  this->capture_stride_ = format.fmt.pix.bytesperline;
+  size_t packed_stride = static_cast<size_t>(this->width_) * this->bytes_per_pixel_();
+  if (this->capture_stride_ == 0)
+    this->capture_stride_ = packed_stride;
+  if (this->capture_stride_ != packed_stride) {
+    ESP_LOGD(TAG, "Sensor row stride is %u bytes (packed would be %u); frames will be de-strided",
+             static_cast<unsigned>(this->capture_stride_), static_cast<unsigned>(packed_stride));
+  }
+
   if (this->horizontal_mirror_ || this->vertical_flip_) {
     struct v4l2_ext_control controls[1]{};
     struct v4l2_ext_controls ext_controls{};
@@ -407,6 +421,27 @@ void MipiCsiCamera::capture_task(void *param) {
 
   self->capture_task_stopped_.store(true, std::memory_order_relaxed);
   vTaskDelete(nullptr);
+}
+
+/* ---------------- de-striding ---------------- */
+
+uint8_t *MipiCsiCamera::destride_frame_(uint8_t *src, uint16_t width, uint16_t height) {
+  size_t packed_stride = static_cast<size_t>(width) * this->bytes_per_pixel_();
+  if (this->capture_stride_ == 0 || this->capture_stride_ == packed_stride)
+    return src;  // common case: driver already produced tightly-packed rows, nothing to do
+
+  size_t packed_size = packed_stride * height;
+  auto *dest = static_cast<uint8_t *>(heap_caps_malloc(packed_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (dest == nullptr) {
+    ESP_LOGW(TAG, "Not enough PSRAM to de-stride frame; image will be corrupted");
+    return src;
+  }
+
+  for (uint16_t row = 0; row < height; row++) {
+    memcpy(dest + static_cast<size_t>(row) * packed_stride, src + static_cast<size_t>(row) * this->capture_stride_,
+           packed_stride);
+  }
+  return dest;
 }
 
 /* ---------------- rotation ---------------- */
@@ -620,8 +655,18 @@ void MipiCsiCamera::loop() {
   uint8_t *raw = this->capture_buffers_[index];
   uint16_t out_width = this->width_;
   uint16_t out_height = this->height_;
-  size_t frame_size = this->capture_buffer_size_;
-  uint8_t *frame_data = this->rotate_frame_(raw, this->width_, this->height_, frame_size, &out_width, &out_height);
+
+  // Repack the frame into tightly-packed rows first (no-op/zero-copy if the driver's stride
+  // already matches), since rotation/JPEG-encoding/raw pass-through all assume that layout.
+  uint8_t *destrided = this->destride_frame_(raw, this->width_, this->height_);
+  bool destride_owned = destrided != raw;
+  size_t packed_size = static_cast<size_t>(this->width_) * this->height_ * this->bytes_per_pixel_();
+  size_t frame_size = destride_owned ? packed_size : this->capture_buffer_size_;
+
+  uint8_t *frame_data =
+      this->rotate_frame_(destrided, this->width_, this->height_, frame_size, &out_width, &out_height);
+  if (destride_owned && frame_data != destrided)
+    heap_caps_free(destrided);  // superseded by rotate_frame_'s own output buffer
   bool rotated_copy = frame_data != raw;
 
   uint8_t requesters = single | stream;

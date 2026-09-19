@@ -175,6 +175,12 @@ class MipiCsiCamera final : public camera::Camera {
   bool allocate_buffers_();
   void start_capture_();
   void stop_capture_();
+  /// Repacks a captured frame from the driver-negotiated per-row stride (`capture_stride_`,
+  /// which may include alignment padding the CSI/ISP pipeline adds) into tightly-packed rows of
+  /// `width_ * bytes_per_pixel_()` bytes. Returns `src` unchanged (no copy) when the stride
+  /// already matches the tightly-packed width, which is the common case. The returned buffer (if
+  /// different from `src`) is heap_caps_free()-owned by the caller.
+  uint8_t *destride_frame_(uint8_t *src, uint16_t width, uint16_t height);
   /// Applies rotation/mirror/flip in hardware via the PPA (Pixel Processing
   /// Accelerator) and returns a heap buffer holding the transformed frame.
   /// Returns the original buffer untouched when rotation_ == 0.
@@ -215,6 +221,12 @@ class MipiCsiCamera final : public camera::Camera {
   int video_fd_{-1};
   std::vector<uint8_t *> capture_buffers_;
   size_t capture_buffer_size_{0};
+  /// Per-row stride (bytes) the driver actually negotiated in VIDIOC_S_FMT's `bytesperline`
+  /// out-parameter. The ESP32-P4 CSI/ISP pipeline may pad each row to an alignment boundary,
+  /// so this can be larger than `width_ * bytes_per_pixel_()`; frames are de-strided (repacked
+  /// into tightly-packed rows) before being rotated/JPEG-encoded/sent, since none of those
+  /// stages understand a separate stride.
+  size_t capture_stride_{0};
   bool streaming_{false};
   ppa_client_handle_t ppa_handle_{nullptr};
   jpeg_encoder_handle_t jpeg_encoder_{nullptr};
