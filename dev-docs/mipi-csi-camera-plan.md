@@ -686,3 +686,59 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
         multipliers, or exposing exposure/gain as a configurable option in a
         future iteration if the sensor's baked-in defaults are too dark/bright
         for the user's environment).
+
+        - **2026-09-19 (maintainability cleanup) — separated OV02C10-specific code from
+          the generic driver, and confirmed the horizontal/vertical mirror config
+          option already exists and is wired up correctly.**
+          - Extracted the two remaining pieces of OV02C10-only logic that were living
+            directly in the generic `mipi_csi_camera.cpp`/`.h` (the linker
+            keep-alive workaround for the vendored, non-`esp_cam_sensor`-registry
+            driver, and the fixed RGB565 color-correction gains from the previous
+            entry) into a new small adapter pair, `ov02c10_esphome.h`/`.cpp`, exposing
+            just `ov02c10::force_link()` and `ov02c10::apply_rgb565_color_correction()`.
+            `mipi_csi_camera.cpp` now only calls these two named functions (gated on
+            `sensor_model_ == MIPI_CSI_SENSOR_OV02C10`) instead of containing any
+            OV02C10-specific register/tuning detail itself, so it stays sensor-agnostic
+            and a future second vendored (non-registry) sensor would only need its own
+            `<name>_esphome.{h,cpp}` adapter, not changes to the generic capture/
+            rotate/encode pipeline.
+          - **Attempted, then reverted, moving all `ov02c10_*` files into a
+            `sensors/ov02c10/` subfolder** for clearer separation. A scratch compile
+            showed the subfolder's files were silently never copied into the ESP-IDF
+            build tree at all (`fatal error: sensors/ov02c10/ov02c10_esphome.h: No
+            such file or directory`, and inspecting the generated build source tree
+            confirmed only the two top-level files were copied). Traced this to
+            ESPHome's own component loader
+            (`esphome/loader.py::ComponentManifest.resources()`): regular components
+            (including git/local `external_components`) are only scanned with
+            `recursive_sources=False`, so only files directly inside the component's
+            own top-level directory are ever picked up - one-level subdirectories are
+            only supported for ESPHome's own core code
+            (`recursive_sources=True`, used solely by `esphome.core.config`). Moved
+            all `ov02c10_*` files back to the flat top-level directory (their
+            original location) to match this constraint; kept the new
+            `ov02c10_esphome.h`/`.cpp` adapter files (also flat, prefixed
+            `ov02c10_`) since that separation is still real and useful even without
+            a subfolder. Updated `README.md`/`__init__.py` comments to describe the
+            flat-with-prefix convention instead of a subfolder, and to document why
+            a subfolder isn't possible, to save a future rediscovery of this
+            constraint.
+          - Checked the "mirror both horizontally and vertically" request against
+            the existing code: `horizontal_mirror`/`vertical_flip` config options
+            already exist, are already wired through `V4L2_CID_HFLIP`/`V4L2_CID_VFLIP`
+            in `configure_format_()`, and the OV02C10 driver already implements both
+            (`ov02c10_set_mirror()`/`ov02c10_set_vflip()`, simple register-bit
+            toggles at 0x3821/0x3820) - reviewed this code and it looks complete and
+            correct, unlike the earlier gain-control investigation. Setting both
+            options to `true` mirrors the image on both axes; no new option was
+            needed. Documented this explicitly in `README.md`'s new "OV02C10 color
+            correction" section area so it isn't rediscovered as a gap later.
+          - **Verified** with a scratch compile (same config as before, plus
+            `horizontal_mirror: true`/`vertical_flip: true` added to exercise that
+            code path): compiled successfully. Scratch test directory removed
+            afterward. Runtime behavior (does the image actually appear mirrored on
+            both axes) can only be confirmed on real hardware.
+          - No behavior change from this cleanup beyond the (already-existing)
+            mirror options being called out explicitly; user to reflash and confirm
+            the color-correction fix from the previous entry still works as expected
+            (this entry didn't change any of that logic, only where it lives).

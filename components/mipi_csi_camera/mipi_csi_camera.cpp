@@ -24,23 +24,13 @@
 #include "esp_video_device.h"
 #include "linux/videodev2.h"
 
-#include "ov02c10.h"
+#include "ov02c10_esphome.h"
 
 namespace esphome::mipi_csi_camera {
 
 static const char *const TAG = "mipi_csi_camera";
 static constexpr size_t CAPTURE_TASK_STACK_SIZE = 4096;
 static constexpr UBaseType_t CAPTURE_TASK_PRIORITY = 4;
-
-// esp_cam_sensor's auto-detect array only picks up sensor drivers that are part of its own
-// managed component (each of which gets a `-u <sensor>_detect` linker force-reference from its
-// own build scripts). Our vendored OV02C10 driver lives outside that system, so nothing else in
-// the firmware references any symbol from ov02c10.c — meaning the linker silently drops that
-// whole object file (along with its `ESP_CAM_SENSOR_DETECT_FN` auto-registration entry) since it
-// would otherwise appear entirely unused. Referencing `ov02c10_detect()` here forces the linker to
-// keep it, matching the workaround esp_cam_sensor's own header documents for driver authors:
-// https://github.com/espressif/esp-video-components/blob/master/esp_cam_sensor/include/esp_cam_sensor_detect.h
-static void *const ov02c10_detect_keep_alive_ __attribute__((used)) = reinterpret_cast<void *>(&ov02c10_detect);
 
 
 static const char *sensor_model_to_str(MipiCsiSensorModel model) {
@@ -119,6 +109,12 @@ size_t MipiCsiCamera::bytes_per_pixel_() const {
 /* ---------------- setup ---------------- */
 
 void MipiCsiCamera::setup() {
+  if (this->sensor_model_ == MIPI_CSI_SENSOR_OV02C10) {
+    // See ov02c10_esphome.h: forces the linker to keep the vendored ov02c10.c driver, which
+    // would otherwise be silently dropped as unused.
+    ov02c10::force_link();
+  }
+
   // SCCB always reuses the already-configured ESPHome `i2c:` bus (see
   // set_i2c_bus()) rather than starting a second, independent I2C driver;
   // the config schema guarantees external_i2c_bus_ is set before setup().
@@ -675,20 +671,10 @@ void MipiCsiCamera::loop() {
   // why enabling it made the image worse, not better. Without it, the ISP's plain demosaic output
   // has a visible green cast (Bayer's 2x green sample density) that a fixed gentle software gain
   // correction on the RGB565 channels reduces, mirroring the same workaround used by other
-  // community OV02C10/ESP32-P4 camera projects.
-  if (this->pixel_format_ == MIPI_CSI_PIXEL_FORMAT_RGB565) {
-    auto *pixels = reinterpret_cast<uint16_t *>(frame_data);
-    size_t num_pixels = frame_size / 2;
-    for (size_t i = 0; i < num_pixels; i++) {
-      uint16_t px = pixels[i];
-      uint32_t r = (px >> 11) & 0x1F;
-      uint32_t g = (px >> 5) & 0x3F;
-      uint32_t b = px & 0x1F;
-      r = std::min<uint32_t>((r * 166) >> 7, 31);  // * 1.30
-      g = std::min<uint32_t>((g * 115) >> 7, 63);  // * 0.90
-      b = std::min<uint32_t>((b * 166) >> 7, 31);  // * 1.30
-      pixels[i] = static_cast<uint16_t>((r << 11) | (g << 5) | b);
-    }
+  // community OV02C10/ESP32-P4 camera projects. This correction is tuned specifically for the
+  // OV02C10 (see sensors/ov02c10/ov02c10_esphome.cpp); other sensors don't need it.
+  if (this->sensor_model_ == MIPI_CSI_SENSOR_OV02C10 && this->pixel_format_ == MIPI_CSI_PIXEL_FORMAT_RGB565) {
+    ov02c10::apply_rgb565_color_correction(reinterpret_cast<uint16_t *>(frame_data), frame_size / 2);
   }
 
   uint8_t requesters = single | stream;

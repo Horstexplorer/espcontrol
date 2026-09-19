@@ -113,6 +113,25 @@ As with the other sensors, any ISP output format (`GRAYSCALE`/`RGB565`/
 `RGB888`/`YUV422`/`YUV420`) can be requested at the same resolution/framerate
 instead of `RAW10`.
 
+### OV02C10 color correction
+
+The ESP32-P4's ISP performs a plain demosaic (Bayer → RGB conversion) with no
+auto exposure/gain/white-balance/color-correction unless the `esp_ipa`-driven
+auto pipeline (`CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER`) is enabled -
+and that pipeline needs per-sensor JSON calibration data
+(`esp_cam_sensor/sensors/<name>/cfg/<name>_default.json`) that only exists for
+sensors in the official `esp_cam_sensor` registry (SC2336/OV5647/OV2710).
+OV02C10 isn't in that registry, so enabling the auto pipeline for it produces
+a far worse image (a fully-saturated solid-color frame) rather than a better
+one - see `dev-docs/mipi-csi-camera-plan.md` for the investigation. Instead,
+when `pixel_format: RGB565` is used with OV02C10, `MipiCsiCamera::loop()`
+applies a small fixed per-channel gain correction
+(`sensors/ov02c10/ov02c10_esphome.cpp`) to counteract the plain demosaic's
+visible green cast (Bayer sensors sample green at 2x the rate of red/blue).
+This is a static approximation, not real auto white balance, so exposure
+still comes solely from the sensor's built-in per-mode register defaults (no
+closed-loop auto exposure).
+
 ## Notes on the SCCB (camera I2C) bus
 
 SCCB always reuses an existing `i2c:` bus (via `i2c_id`) rather than the
@@ -249,6 +268,18 @@ repository — genuinely Apache-2.0 licensed (see the SPDX headers in each
 file), even though it isn't (yet, as of writing) published in the public
 managed-component registry.
 
+All OV02C10-specific glue code that isn't part of the vendored driver itself
+(the linker keep-alive workaround, and the software color-cast correction -
+see "OV02C10 color correction" above) lives in `ov02c10_esphome.{h,cpp}`
+rather than in the generic `mipi_csi_camera.cpp`/`.h`. This keeps the generic
+driver sensor-agnostic: adding another vendored (non-`esp_cam_sensor`-registry)
+sensor in the future means adding another `<name>_esphome.{h,cpp}` adapter
+with the same shape, not touching the generic capture/rotate/encode
+pipeline. All of a vendored sensor's files still have to live flat in this
+directory (there's no subfolder here) — ESPHome's external-component loader
+only picks up source files placed directly inside the component's own
+directory, it does not recurse into subdirectories.
+
 Because it's vendored outside `esp_cam_sensor`'s own build system, OV02C10
 also needs one small extra piece of glue: `esp_cam_sensor` discovers cameras
 by iterating a runtime array of every `ESP_CAM_SENSOR_DETECT_FN`-registered
@@ -258,8 +289,10 @@ by their own component's build scripts; nothing does this for a vendored
 driver, so the linker would otherwise silently drop `ov02c10.c` entirely
 (no compile/link error — it just never gets called, `esp_video_init()`
 succeeds trivially with no camera found, and `/dev/video0` never gets
-created). `mipi_csi_camera.cpp` works around this by taking the address of
+created). `ov02c10_esphome.cpp` works around this by taking the address of
 the public `ov02c10_detect()` function in a `__attribute__((used))` static
-variable, forcing the linker to keep the whole object file. See
+variable, and `mipi_csi_camera.cpp` calls `ov02c10::force_link()` once
+during `setup()` to make sure that translation unit itself is linked in.
+See
 [`esp_cam_sensor_detect.h`](https://github.com/espressif/esp-video-components/blob/master/esp_cam_sensor/include/esp_cam_sensor_detect.h)'s
 own comment for background on why this is necessary.
