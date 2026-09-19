@@ -352,8 +352,11 @@ async def to_code(config: ConfigType) -> None:
 
     if config[CONF_SENSOR] == "OV02C10":
         # OV02C10 isn't in the espressif/esp_cam_sensor managed component
-        # registry, so its driver is vendored under sensors/ov02c10/ instead
-        # (see that directory's ov02c10_compat.h and README.md for details).
+        # registry, so its driver is vendored directly in this component's
+        # directory instead (files prefixed `ov02c10_*`; see
+        # ov02c10_compat.h and README.md for details). Note: it can't live in
+        # its own subfolder - ESPHome's external-component loader only picks
+        # up source files placed directly inside the component's directory.
         # It has no real Kconfig entry to toggle via add_idf_sdkconfig_option,
         # so its "which capture mode is compiled in" macro is supplied
         # directly as a global build flag instead.
