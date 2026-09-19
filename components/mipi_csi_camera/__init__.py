@@ -352,11 +352,23 @@ async def to_code(config: ConfigType) -> None:
     # Espressif's V4L2-style camera stack: esp_video provides the MIPI-CSI
     # capture pipeline + ISP, esp_cam_sensor provides the SC2336/OV5647
     # register tables. Both are required regardless of which sensor is used.
-    add_idf_component(name="espressif/esp_video", ref="~2.0")
-    add_idf_component(name="espressif/esp_cam_sensor", ref="~2.0")
+    # esp_video >= 2.3.0 is required: 2.0.x-2.2.x hardcode the ISP processor
+    # clock to 80MHz regardless of the actual clock source, which is exactly
+    # at the OV02C10's ~80Mpx/s output rate - any DMA/PSRAM hiccup then makes
+    # the ISP input FIFO overflow ("ISP: fifo overflow" spam, torn/streaked
+    # frames, and eventually an interrupt-WDT crash from the error-interrupt
+    # spam). 2.3.0 derives the ISP clock from clk_src (up to 240MHz) instead;
+    # 2.4.1 additionally fixes ISP/MIPI-CSI driver compatibility on the
+    # ESP-IDF 5.5.x line that ESPHome uses. See dev-docs/mipi-csi-camera-plan.md.
+    add_idf_component(name="espressif/esp_video", ref="~2.4.1")
+    add_idf_component(name="espressif/esp_cam_sensor", ref="~2.4.0")
 
     add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE", True)
     add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE", True)
+    # Belt-and-braces against the ISP error interrupt storm resetting the chip if a
+    # FIFO overflow ever does happen again (option added in esp_video 2.4.0 for
+    # exactly this purpose): lose the error log, keep the device alive.
+    add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_DISABLE_ISP_ERROR_INTERRUPT", True)
     # NOTE: CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER (the esp_ipa-driven auto exposure/
     # gain/white-balance task) was tried here and reverted - see dev-docs/mipi-csi-camera-plan.md.
     # esp_ipa's AWB/AGC/color-correction algorithms are tuned via per-sensor JSON calibration data

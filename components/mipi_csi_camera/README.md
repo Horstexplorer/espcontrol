@@ -139,15 +139,17 @@ else is rejected at config-validation time:
 | `1920x1080`   | `1`          | `RAW10`               | `30`        |
 | `1920x1080`   | `2`          | `RAW10`               | `30`        |
 
-> **Prefer the 2-lane mode.** Both 1-lane modes run the MIPI link at
-> ~100% of its capacity (the sensor pushes ~810 Mbps of RAW10 payload onto
-> a single 400/405 MHz DDR lane that carries only ~800/810 Mbps before
-> protocol overhead), so the sensor's output FIFO chronically overruns and
-> frames arrive with streaks, shifted bands and torn lines. The 2-lane
-> 1920x1080 mode has ~2x headroom and is what the panel vendor's own
-> demo application (`video_lcd_display`, which is tear-free) uses. Treat
-> the 1-lane modes as last-resort fallbacks for boards that physically
+> **Prefer the 2-lane mode.** It's what the panel vendor's own demo
+> application (`video_lcd_display`) uses, and it leaves generous headroom
+> on the MIPI link. The 1-lane modes run the link close to its rated
+> capacity; treat them as last-resort fallbacks for boards that physically
 > wire only one lane.
+>
+> Note: if you see torn/streaked frames or `ISP: fifo overflow` log spam
+> with any mode, make sure your build pulled esp_video **>= 2.3.0** - this
+> component requires it, because 2.0.x-2.2.x hardcode the ISP processor
+> clock to 80 MHz (exactly the sensor's ~80 Mpx/s output rate), which
+> makes the ISP input FIFO chronically overflow.
 
 As with the other sensors, any ISP output format (`GRAYSCALE`/`RGB565`/
 `RGB888`/`YUV422`/`YUV420`) can be requested at the same resolution/framerate

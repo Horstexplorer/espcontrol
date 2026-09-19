@@ -1213,3 +1213,42 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
     `resolution: 1920x1080, data_lanes: 2` - exactly the vendor demo's
     proven mode. **Awaiting user hardware retest.**
 
+- User retested with `1920x1080, data_lanes: 2`: **crash again**
+  (`Interrupt wdt timeout on CPU1`) - but this time the log contained the
+  smoking gun: hundreds of `ISP: fifo overflow` errors right before the
+  panic (the error-interrupt log spam itself is what trips the watchdog -
+  esp_video's own Kconfig help for ESP_VIDEO_DISABLE_ISP_ERROR_INTERRUPT
+  describes exactly this failure mode).
+- Re-checked the earlier 1288x728/1-lane log: it ALSO contained 322
+  `ISP: fifo overflow` errors (previously overlooked while grepping for
+  "Dropping short frame"). **The ISP input FIFO overflows at every
+  resolution and lane count** - which kills the 1-lane link-budget theory
+  (all OV02C10 modes feed the ISP at the same ~80 Mpx/s pclk; the MIPI
+  lane rate was never the bottleneck) and points at ISP throughput.
+- Root cause found in esp_video's own CHANGELOG: **esp_video 2.0.x-2.2.x
+  hardcode the ISP processor clock to 80 MHz regardless of clock source**;
+  2.3.0 fixed it ("`clk_hz` now derived from `clk_src` (XTAL/PLL160/
+  PLL240) **to prevent FIFO overflow errors**"). We pinned
+  `espressif/esp_video ~2.0`, i.e. 2.0.x - ISP running at exactly the
+  sensor's ~80 Mpx/s output rate, so the slightest DMA/PSRAM contention
+  overflows the ISP input FIFO -> torn/streaked frames at every
+  resolution, matching every symptom and every failed software fix.
+  (The vendor demo got away with the same esp_video 2.0.x because it ran
+  on ESP-IDF 5.4.0; we run ESPHome's IDF 5.5.5, whose refactored ISP/
+  MIPI-CSI drivers behave worse with the misconfigured clock. The
+  reference component sidesteps it entirely by using esp_video master.)
+- **Fix**: bumped `espressif/esp_video` to `~2.4.1` (ISP clock fix in
+  2.3.0 + ISP/MIPI-CSI driver compatibility fixes for the IDF 5.5.x line
+  in 2.4.1) and `espressif/esp_cam_sensor` to `~2.4.0` (esp_video 2.4.1's
+  required version), and enabled
+  `CONFIG_ESP_VIDEO_DISABLE_ISP_ERROR_INTERRUPT` (added in 2.4.0 for
+  exactly this crash mode) so a stray overflow can never watchdog-reset
+  the device again. Resolved versions verified in the scratch build:
+  esp_video 2.4.1, esp_cam_sensor 2.4.0; vendored OV02C10 driver compiles
+  unchanged against the 2.4 API. Verified via a scratch `esphome compile`
+  (OV02C10, RGB565, 1920x1080, 2 lanes): compiled successfully.
+  **Awaiting user hardware retest** - expectation: no `fifo overflow`
+  lines, no WDT crash, and (finally) a clean image. The 1-lane modes
+  remain link-marginal on paper, so 2-lane 1920x1080 stays the
+  recommended config regardless.
+
