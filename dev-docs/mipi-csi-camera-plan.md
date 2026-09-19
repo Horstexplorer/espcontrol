@@ -17,7 +17,16 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
 ## Hardware / vendor reference facts
 
 - Example project: `JC8012P4A1C_I_W_Y_New_Panel/video_lcd_display` — Espressif
-  `esp_video` (V4L2-style) sample for the ESP32-P4-Function-EV-Board.
+  `esp_video` (V4L2-style) sample for the ESP32-P4-Function-EV-Board. **This
+  folder is a local-only copy of Guition's board vendor SDK, kept on
+  contributors' machines during development - it is not committed to this
+  repository** (it's untracked/gitignored-in-practice; too large and not
+  ours to redistribute wholesale). Paths under it in this document are
+  development notes for whoever has a local copy, not references to files
+  that ship in the repo. See `components/mipi_csi_camera/README.md`'s
+  "Attribution" section for how the one piece of code actually copied from
+  it (the OV02C10 sensor driver) is attributed without depending on that
+  local path.
 - Camera sensor: **SC2336** (2MP), MIPI-CSI, connected over SCCB (I2C-like).
   `OV5647` is also supported by the same BSP/driver stack.
 - Driver stack used by the vendor examples (not something we should
