@@ -431,3 +431,51 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
     `RGB565`, `init_ldo: false`): `esphome compile` succeeded. Documented the
     shutdown behavior and its rationale in the README. Scratch test directory
     removed afterward.
+
+    - **Camera entity not usable in Home Assistant (no JPEG encoding was ever
+      implemented)**: after a successful clean install (no exceptions in the
+      log), the user reported no way to view the camera in Home Assistant's UI.
+      Traced through ESPHome's `camera`/`api` components
+      (`esphome/components/camera/camera.h`,
+      `esphome/components/api/api_connection.cpp`): the entity itself is created
+      automatically via the `camera::Camera` singleton (`Camera::instance()`,
+      `AUTO_LOAD = ["camera"]`, `setup_entity(var, config, "camera")` - same
+      pattern as `esp32_camera`) as soon as `api:` is enabled, so no separate
+      registration step was needed there. However, `homeassistant/components/
+      esphome/camera.py` (HA's ESPHome integration) and ESPHome's API protocol
+      always treat camera image bytes as JPEG - and this component's
+      `jpeg_quality` config option, while present in the schema since the
+      initial implementation (intended to mirror `esp32_camera`'s re-encoding
+      behavior), was never actually wired to any encoding code: `loop()` always
+      sent the raw ISP/sensor output bytes (RGB565/RAW10/etc.) directly to
+      listeners. Home Assistant would therefore either not display anything
+      useful or fail to decode the image, regardless of pixel format chosen.
+      Fix: implemented real JPEG re-encoding using the ESP32-P4's hardware JPEG
+      encoder (`driver/jpeg_encode.h`, `jpeg_new_encoder_engine()` /
+      `jpeg_encoder_process()`), created in `setup()` when `jpeg_quality > 0` and
+      invoked per-frame in `loop()` via a new `encode_jpeg_()` helper. Mapped our
+      pixel formats to the driver's `jpeg_enc_input_format_t` values
+      (`RGB565`→`JPEG_ENCODE_IN_FORMAT_RGB565`, `RGB888`→`_RGB888`,
+      `YUV422`→`_YUV422`, `YUV420`→`_YUV420`, `GRAYSCALE`→`_GRAY`; `RAW8`/`RAW10`
+      have no direct JPEG source format and are rejected at config-validation
+      time if `jpeg_quality` is set). Both the encoder's input and output
+      buffers must satisfy the hardware's DMA2D/cache-line alignment
+      constraints (confirmed by reading `jpeg_encoder_process()`'s source in
+      `esp-idf`'s `esp_driver_jpeg/jpeg_encode.c`) - our V4L2/PPA-rotated
+      buffers aren't guaranteed to meet that, so `encode_jpeg_()` copies the
+      source frame into a `jpeg_alloc_encoder_mem()`-allocated, properly-aligned
+      input buffer before encoding (a small extra copy, traded for correctness/
+      safety on real hardware rather than risking subtle alignment bugs).
+      `loop()` now sends the JPEG-encoded buffer to listeners when available,
+      falling back to the raw/rotated buffer if encoding is disabled or fails.
+      `on_shutdown()` now also releases the JPEG encoder engine
+      (`jpeg_del_encoder_engine()`). Updated Python validation
+      (`validate_jpeg_quality`) to reject `jpeg_quality > 0` combined with
+      `RAW8`/`RAW10` pixel formats, and simplified the redundant PSRAM
+      final-validation check. Verified with a scratch ESP32-P4 test YAML
+      (`OV02C10`, `1288x728`, `data_lanes: 1`, `RGB565`, `jpeg_quality: 10`,
+      `psram: hex`): `esphome compile` succeeded; also verified the
+      `jpeg_quality` + `RAW10` combination is correctly rejected by `esphome
+      config`. Documented the Home Assistant JPEG requirement and a working
+      example config in a new README section. Scratch test directories removed
+      afterward.

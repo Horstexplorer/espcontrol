@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <cerrno>
+#include <algorithm>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -172,6 +173,20 @@ void MipiCsiCamera::setup() {
     this->ppa_handle_ = nullptr;
   }
 
+  // Home Assistant (and the ESPHome API in general) always treats camera image bytes as JPEG, so
+  // any non-JPEG pixel format needs re-encoding before it's usable there. jpeg_quality == 0 means
+  // the user explicitly wants raw frames only (e.g. for a custom on_image consumer downstream).
+  if (this->jpeg_quality_ > 0) {
+    jpeg_encode_engine_cfg_t enc_eng_cfg = {};
+    enc_eng_cfg.timeout_ms = 1000 / std::max<uint8_t>(this->framerate_, 1) + 100;
+    esp_err_t jpeg_err = jpeg_new_encoder_engine(&enc_eng_cfg, &this->jpeg_encoder_);
+    if (jpeg_err != ESP_OK) {
+      ESP_LOGW(TAG, "JPEG encoder engine creation failed (%s); frames will be sent unencoded",
+               esp_err_to_name(jpeg_err));
+      this->jpeg_encoder_ = nullptr;
+    }
+  }
+
   this->frame_queue_ = xQueueCreate(1, sizeof(int));
   this->start_capture_();
 
@@ -332,6 +347,11 @@ void MipiCsiCamera::on_shutdown() {
     this->ppa_handle_ = nullptr;
   }
 
+  if (this->jpeg_encoder_ != nullptr) {
+    jpeg_del_encoder_engine(this->jpeg_encoder_);
+    this->jpeg_encoder_ = nullptr;
+  }
+
   for (auto *buffer : this->capture_buffers_) {
     if (buffer != nullptr)
       munmap(buffer, this->capture_buffer_size_);
@@ -462,6 +482,89 @@ uint8_t *MipiCsiCamera::rotate_frame_(uint8_t *src, uint16_t width, uint16_t hei
   return dest;
 }
 
+/* ---------------- JPEG re-encoding ---------------- */
+
+uint8_t *MipiCsiCamera::encode_jpeg_(const uint8_t *src, uint16_t width, uint16_t height, size_t src_size,
+                                    size_t *out_size) {
+  if (this->jpeg_encoder_ == nullptr)
+    return nullptr;
+
+  jpeg_enc_input_format_t src_type;
+  jpeg_down_sampling_type_t sub_sample;
+  switch (this->pixel_format_) {
+    case MIPI_CSI_PIXEL_FORMAT_RGB565:
+      src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
+      sub_sample = JPEG_DOWN_SAMPLING_YUV420;
+      break;
+    case MIPI_CSI_PIXEL_FORMAT_RGB888:
+      src_type = JPEG_ENCODE_IN_FORMAT_RGB888;
+      sub_sample = JPEG_DOWN_SAMPLING_YUV420;
+      break;
+    case MIPI_CSI_PIXEL_FORMAT_YUV422:
+      src_type = JPEG_ENCODE_IN_FORMAT_YUV422;
+      sub_sample = JPEG_DOWN_SAMPLING_YUV422;
+      break;
+    case MIPI_CSI_PIXEL_FORMAT_YUV420:
+      src_type = JPEG_ENCODE_IN_FORMAT_YUV420;
+      sub_sample = JPEG_DOWN_SAMPLING_YUV420;
+      break;
+    case MIPI_CSI_PIXEL_FORMAT_GRAYSCALE:
+      src_type = JPEG_ENCODE_IN_FORMAT_GRAY;
+      sub_sample = JPEG_DOWN_SAMPLING_GRAY;
+      break;
+    default:
+      // RAW8/RAW10 sensor Bayer data has no direct JPEG source format; config validation
+      // (__init__.py) already rejects jpeg_quality > 0 with these pixel formats.
+      return nullptr;
+  }
+
+  // The hardware JPEG encoder's DMA2D engine requires *both* its input and output buffers to
+  // satisfy specific cache-line/DMA2D alignment constraints (see esp_driver_jpeg's
+  // jpeg_encoder_process()); our V4L2/PPA-rotated buffers aren't guaranteed to meet that, so copy
+  // the source frame into a freshly `jpeg_alloc_encoder_mem()`-allocated input buffer first.
+  jpeg_encode_memory_alloc_cfg_t in_mem_cfg = {.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER};
+  size_t in_capacity = 0;
+  auto *in_buf = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(src_size, &in_mem_cfg, &in_capacity));
+  if (in_buf == nullptr) {
+    ESP_LOGW(TAG, "Failed to allocate JPEG input buffer (%u bytes)", static_cast<unsigned>(src_size));
+    return nullptr;
+  }
+  memcpy(in_buf, src, src_size);
+
+  // In the worst case (very high-entropy/noisy scenes) the compressed output can approach the
+  // raw input size; size the output buffer the same as the input to stay safe.
+  jpeg_encode_memory_alloc_cfg_t out_mem_cfg = {.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER};
+  size_t out_capacity = 0;
+  auto *out_buf = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(src_size, &out_mem_cfg, &out_capacity));
+  if (out_buf == nullptr) {
+    ESP_LOGW(TAG, "Failed to allocate JPEG output buffer (%u bytes)", static_cast<unsigned>(src_size));
+    heap_caps_free(in_buf);
+    return nullptr;
+  }
+
+  jpeg_encode_cfg_t encode_cfg = {};
+  encode_cfg.height = height;
+  encode_cfg.width = width;
+  encode_cfg.src_type = src_type;
+  encode_cfg.sub_sample = sub_sample;
+  // jpeg_quality_ uses the same inverted IJG-style scale as ESP32Camera's frame2jpg() convention
+  // (lower value = higher quality); the hardware encoder instead wants 1-100, higher = better.
+  encode_cfg.image_quality = 100 - this->jpeg_quality_;
+
+  uint32_t encoded_size = 0;
+  esp_err_t err = jpeg_encoder_process(this->jpeg_encoder_, &encode_cfg, in_buf, static_cast<uint32_t>(src_size),
+                                       out_buf, static_cast<uint32_t>(out_capacity), &encoded_size);
+  heap_caps_free(in_buf);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "JPEG encode failed: %s", esp_err_to_name(err));
+    heap_caps_free(out_buf);
+    return nullptr;
+  }
+
+  *out_size = encoded_size;
+  return out_buf;
+}
+
 /* ---------------- Camera interface ---------------- */
 
 void MipiCsiCamera::request_image(camera::CameraRequester requester) {
@@ -507,13 +610,31 @@ void MipiCsiCamera::loop() {
   uint8_t requesters = single | stream;
   this->single_requesters_.store(0);
 
-  auto image = std::make_shared<MipiCsiCameraImage>(frame_data, frame_size, out_width, out_height, requesters);
+  uint8_t *send_data = frame_data;
+  size_t send_length = frame_size;
+  bool send_data_owned = rotated_copy;  // the rotated copy needs freeing, unless a JPEG buffer replaces it below
+
+  if (this->jpeg_encoder_ != nullptr) {
+    size_t jpeg_length = 0;
+    uint8_t *jpeg_data = this->encode_jpeg_(frame_data, out_width, out_height, frame_size, &jpeg_length);
+    if (jpeg_data != nullptr) {
+      if (rotated_copy)
+        heap_caps_free(frame_data);  // fully consumed by the encoder now; no longer needed
+      send_data = jpeg_data;
+      send_length = jpeg_length;
+      send_data_owned = true;
+    }
+    // On encode failure, fall through and send the raw/rotated buffer instead - still usable by
+    // on_image automations even if Home Assistant can't display it as a JPEG.
+  }
+
+  auto image = std::make_shared<MipiCsiCameraImage>(send_data, send_length, out_width, out_height, requesters);
   for (auto *listener : this->listeners_)
     listener->on_camera_image(image);
   image.reset();
 
-  if (rotated_copy)
-    heap_caps_free(frame_data);
+  if (send_data_owned)
+    heap_caps_free(send_data);
 
   struct v4l2_buffer buf{};
   buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -553,6 +674,16 @@ void MipiCsiCamera::dump_config() {
 
   if (this->ppa_handle_ == nullptr && this->rotation_ != 0) {
     ESP_LOGW(TAG, "  Rotation requested but PPA is unavailable; frames will be delivered unrotated");
+  }
+
+  if (this->jpeg_quality_ > 0) {
+    ESP_LOGCONFIG(TAG, "  JPEG Re-encoding: quality %u (%s)", this->jpeg_quality_,
+                 this->jpeg_encoder_ != nullptr ? "enabled" : "engine creation failed, sending raw frames");
+  } else {
+    ESP_LOGCONFIG(TAG,
+                 "  JPEG Re-encoding: disabled (frames sent as raw %s; Home Assistant/the API can't "
+                 "display these directly - set jpeg_quality to enable)",
+                 pixel_format_to_str(this->pixel_format_));
   }
 }
 

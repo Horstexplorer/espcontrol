@@ -90,7 +90,7 @@ mipi_csi_camera:
 | `horizontal_mirror`    | no       | `false` | Mirrors the image horizontally (`V4L2_CID_HFLIP`).                          |
 | `vertical_flip`        | no       | `false` | Flips the image vertically (`V4L2_CID_VFLIP`).                              |
 | `contrast`/`brightness`/`saturation` | no | `0` | `-2` to `2`, forwarded to the sensor if supported.               |
-| `jpeg_quality`         | no       | `0`     | `0` disables JPEG re-encoding; `6`-`63` re-encodes non-JPEG output.          |
+| `jpeg_quality`         | no       | `0`     | `0` disables JPEG re-encoding; `6`-`63` re-encodes the ISP's output (RGB565/RGB888/YUV422/YUV420/GRAYSCALE only, using the ESP32-P4's hardware JPEG encoder) so it can be viewed in Home Assistant/the API. Lower numbers mean higher quality (same inverted scale as `esp32_camera`'s `jpeg_quality`). Requires an `psram:` component; not valid with `RAW8`/`RAW10`. |
 | `frame_buffer_count`   | no       | `2`     | Number of V4L2 capture buffers (2-3).                                       |
 | `init_ldo`             | no       | `true`  | Whether this component should power the shared MIPI PHY LDO regulator (channel 3, 2.5V on the ESP32-P4). Set to `false` if an `esp_ldo:` component elsewhere in your config (typically for the MIPI-DSI display) already powers that same channel — acquiring it twice fails with `esp_ldo_acquire_channel(...): can't acquire the channel, already in use by others or not adjustable`. |
 
@@ -152,6 +152,40 @@ leftover activity on the shared I2C bus was observed to corrupt other
 peripherals' (e.g. a touchscreen's) own boot-time setup - even before this
 component's own `setup()` ran again on that new boot.
 
+## Viewing the camera in Home Assistant
+
+Home Assistant (via the ESPHome API) always treats camera image bytes as
+JPEG - it doesn't know anything about MIPI-CSI, RAW Bayer data, or ISP
+formats. This means:
+
+- `RAW8`/`RAW10` frames can **never** be displayed in Home Assistant (there's
+  no JPEG source format for raw sensor Bayer data); they're only usable
+  through `on_image` for a custom downstream consumer.
+- `RGB565`/`RGB888`/`YUV422`/`YUV420`/`GRAYSCALE` frames **need**
+  `jpeg_quality` set to a non-zero value (e.g. `jpeg_quality: 10`) - this
+  component then re-encodes each frame to JPEG using the ESP32-P4's hardware
+  JPEG encoder before handing it to the API/Home Assistant. With
+  `jpeg_quality: 0` (the default), the API is given the raw ISP output
+  bytes directly and Home Assistant will show a broken/undecodable image.
+
+So, to get a working camera entity in Home Assistant, use one of the ISP
+output formats together with `jpeg_quality`, e.g.:
+
+```yaml
+mipi_csi_camera:
+  sensor: OV02C10
+  resolution: 1288x728
+  data_lanes: 1
+  pixel_format: RGB565
+  jpeg_quality: 10
+```
+
+The camera entity itself is created automatically (no separate `camera:`
+platform block needed, same as `esp32_camera`) as long as `api:` is enabled;
+look for it under the ESPHome device's entities in Home Assistant
+(Settings → Devices & Services → Devices → your device) if it doesn't appear
+on a dashboard automatically.
+
 ## ISP throughput (RGB565/RGB888 at high resolution)
 
 Converting RAW Bayer data to RGB565/RGB888 in real time via the ESP32-P4's
@@ -164,7 +198,8 @@ the watchdog and reboot the device. If you hit this:
 
 - Request `RAW8`/`RAW10` instead (bypasses the ISP color-conversion step
   entirely; do any RGB conversion downstream) - this is the most reliable
-  fix, or
+  fix, though it means Home Assistant can't display the image directly (see
+  above), or
 - Drop to OV02C10's smaller `1288x728` (`data_lanes: 1`) mode, which cuts the
   pixel count (and therefore ISP/PSRAM bandwidth) to less than half of
   1920x1080. Note OV02C10 only ships 30fps register tables in this
