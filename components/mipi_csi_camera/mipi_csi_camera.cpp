@@ -695,15 +695,16 @@ void MipiCsiCamera::loop() {
 
   uint8_t *raw = this->capture_buffers_[index];
 
-  // The MIPI-CSI/ISP DMA engine wrote this buffer directly into PSRAM; that write is not
-  // automatically visible to the CPU data cache. Without invalidating the cache here, reads
-  // below can return a mix of the fresh DMA'd bytes and stale previously-cached bytes,
-  // producing exactly the kind of torn/shifted frames with per-frame color drift seen on
-  // hardware. Invalidate (memory -> cache) before touching the buffer at all. Chunked (see
-  // invalidate_cache_chunked() above) since a single-shot invalidate of a full-resolution frame
-  // both risks tripping the interrupt watchdog and blocks other interrupts for its whole duration.
-  invalidate_cache_chunked(raw, this->capture_buffer_size_);
-
+  // No cache invalidate here: ESP-IDF's CSI controller driver (esp_cam_ctlr_csi.c) already
+  // invalidates each buffer's cache itself, inside its own DMA-done ISR, immediately after the
+  // transfer completes and using the exact number of bytes actually received - before the V4L2
+  // layer ever hands the buffer to us via DQBUF. A second invalidate here would be redundant at
+  // best; at worst, disabling interrupts for a large critical section on the application/task
+  // side (as our previous chunked invalidate did) competes for PSRAM bus bandwidth with the CSI
+  // hardware's own real-time DMA of subsequent frames, which is a plausible explanation for the
+  // persistent tearing seen across every prior fix attempt (all of which left this redundant
+  // invalidate in place). Confirmed by cross-checking the reference esphome-p4-csi-camera
+  // component, which never calls esp_cache_msync() on the captured buffer at all.
   size_t packed_size = static_cast<size_t>(this->width_) * this->height_ * this->bytes_per_pixel_();
 
   // The V4L2 driver reports the *actual* number of valid bytes it wrote for this specific

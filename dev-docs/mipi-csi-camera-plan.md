@@ -1120,3 +1120,44 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   checked for `"Dropping short frame"` warnings and for any repeat of the
   WDT panic.
 
+- **Before that hardware retest happened**, asked to double-check whether
+  the reference `esphome-p4-csi-camera` component does the same manual
+  cache invalidation on the raw captured buffer. It does not call
+  `esp_cache_msync()` anywhere at all. Investigating why led to the real
+  root cause: ESP-IDF's own CSI controller driver
+  (`components/esp_driver_cam/csi/src/esp_cam_ctlr_csi.c` in
+  `espressif/esp-idf`) already invalidates each completed buffer's cache
+  itself, **inside its own DMA-done ISR**, immediately when a transfer
+  finishes and using the exact `received_size` actually captured -
+  *before* the V4L2/`esp_video` layer ever calls back and hands the buffer
+  to our code via `VIDIOC_DQBUF`. Our own manual invalidate in `loop()` was
+  therefore never necessary in the first place.
+- This reframes every prior fix attempt in this investigation: none of
+  them (rotation, lanes, framerate, buffer count, resolution, `bytesused`
+  short-frame detection, even the chunked invalidate from immediately
+  above) addressed the actual defect, because the redundant invalidate
+  itself was still present in all of them. The most likely mechanism for
+  the tearing: our manual `esp_cache_msync()` call runs on the application
+  task, disables interrupts for its critical section, and directly
+  competes for PSRAM bus bandwidth with the CSI hardware's own real-time
+  DMA of the *next* incoming frame - a large enough or badly-timed stall
+  here could plausibly cause the CSI receiver to lose synchronization
+  mid-frame, producing exactly the "correct region, then repeated/shifted
+  bands, then noise" pattern reported throughout this investigation. It
+  also explains the resolution-dependent WDT crash directly: a bigger
+  buffer means a bigger unnecessary critical section stacked on top of the
+  ISR's own (already-sufficient) invalidate.
+- **Fix**: removed the manual `esp_cache_msync()` / `invalidate_cache_chunked()`
+  call on the raw captured buffer in `loop()` entirely, with a comment
+  explaining why it's unnecessary and citing the ESP-IDF driver source.
+  The `invalidate_cache_chunked()` helper is kept and still used for the
+  one place we *do* own the DMA coherency ourselves: the PPA rotate output
+  buffer in `rotate_frame_()` (the PPA is a separate hardware block from
+  the CSI controller and is not covered by the CSI driver's internal
+  invalidate). Verified via a scratch `esphome compile` (OV02C10, RGB565,
+  1288x728, 1 lane): compiled successfully. **Awaiting hardware retest** -
+  this is now considered the most likely actual fix for the tearing (not
+  just a defensive/safety improvement like the previous attempts), so
+  results from this retest are the most important signal yet in this
+  investigation.
+
