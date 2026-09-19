@@ -628,3 +628,61 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
         longer dark/green-tinted/banded. Auto exposure/AWB convergence may take a
         moment after boot or after significant scene changes, so allow the image
         a second or two to settle before judging quality.
+
+    - **2026-09-19 (follow-up 2) — ISP pipeline controller made it *worse*, not
+      better: image became a large solid saturated-red block with only a thin
+      legible strip at the top.** That symptom (a single channel fully clipped
+      across most of the frame) pointed at the auto gain/white-balance/color-
+      correction loop driving its outputs to an unstable, maxed-out state
+      rather than merely "not converged yet". Investigated two candidate
+      causes:
+      1. Reviewed the hand-ported `ov02c10.c` sensor driver's
+         `ov02c10_set_total_gain_val()` gain-write path (one analog fine-gain
+         register write is commented out). This matches the sensor's own
+         documented capability (its analog gain path has no fine-gain step,
+         only coarse), so this is *not* a bug — the driver's actual gain/exposure
+         write path is otherwise complete and correctly wired to
+         `esp_cam_sensor_ops`.
+      2. Found the real cause: read `esp_ipa`'s own README
+         (`espressif/esp-video-components`). Its auto white-balance/auto-gain/
+         color-correction algorithms are **not** generic — each needs a
+         per-sensor JSON calibration file (e.g.
+         `esp_cam_sensor/sensors/sc2336/cfg/sc2336_default.json`,
+         `ov5647_default.json`, `ov2710_default.json`) with sensor-specific
+         tuning ranges (AWB gray-world bounds, gain-step limits, color
+         correction matrix, etc.). **OV02C10 has no such calibration file**
+         because it isn't part of Espressif's official `esp_cam_sensor`
+         registry at all (this project's `ov02c10.c` is a hand-ported driver
+         added specifically for this panel). With the ISP pipeline controller
+         enabled, `esp_ipa`'s algorithms ran with no valid tuning data for this
+         sensor and drove the color-correction/gain output to a degenerate,
+         fully-saturated state — worse than the "dumb but at least stable"
+         uncorrected demosaic from before.
+      - **Fix:** reverted the `CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER`
+        sdkconfig option (removed from `__init__.py`, replaced with a comment
+        explaining why it's intentionally left disabled for this sensor).
+        Added a lightweight software workaround instead, matching the same
+        approach used by the independent `sullb/esphome-p4-csi-camera`
+        project: in `loop()`, when `pixel_format` is `RGB565`, apply a fixed
+        per-channel gain correction (R ×1.30, G ×0.90, B ×1.30, clamped to each
+        channel's bit depth) directly on the captured pixel data before
+        rotation/streaming. This does not require any per-sensor calibration
+        data and specifically counteracts the ISP's uncorrected demosaic's
+        known green bias (Bayer sensors sample green at 2x the rate of red/
+        blue). It does **not** provide auto exposure — very dark/bright scenes
+        will still look under/over-exposed since gain/exposure now come solely
+        from the sensor driver's built-in per-mode defaults (no closed-loop
+        AEC), but this is a much safer starting point than a pipeline that can
+        clip an entire frame to one saturated color.
+      - **Verified** with a scratch compile (same OV02C10/1288x728/RGB565/90°
+        config as before): compiled successfully, and confirmed the generated
+        `sdkconfig` now contains `# CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER
+        is not set`. Scratch test directory removed afterward. Runtime image
+        quality (is the color cast reduced, is exposure acceptable in the
+        user's actual lighting) can only be confirmed on real hardware.
+      - User to cherry-pick/pull the fix, reflash, and confirm the red-out is
+        gone and report whether the remaining color/exposure looks
+        "acceptable" or needs further tuning (e.g. adjusting the fixed gain
+        multipliers, or exposing exposure/gain as a configurable option in a
+        future iteration if the sensor's baked-in defaults are too dark/bright
+        for the user's environment).

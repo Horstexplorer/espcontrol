@@ -669,6 +669,28 @@ void MipiCsiCamera::loop() {
     heap_caps_free(destrided);  // superseded by rotate_frame_'s own output buffer
   bool rotated_copy = frame_data != raw;
 
+  // The ISP's automatic 3A pipeline (auto exposure/gain/white balance) needs per-sensor
+  // calibration data that doesn't exist for the OV02C10 (it isn't in Espressif's official
+  // esp_cam_sensor registry), so it isn't enabled here - see dev-docs/mipi-csi-camera-plan.md for
+  // why enabling it made the image worse, not better. Without it, the ISP's plain demosaic output
+  // has a visible green cast (Bayer's 2x green sample density) that a fixed gentle software gain
+  // correction on the RGB565 channels reduces, mirroring the same workaround used by other
+  // community OV02C10/ESP32-P4 camera projects.
+  if (this->pixel_format_ == MIPI_CSI_PIXEL_FORMAT_RGB565) {
+    auto *pixels = reinterpret_cast<uint16_t *>(frame_data);
+    size_t num_pixels = frame_size / 2;
+    for (size_t i = 0; i < num_pixels; i++) {
+      uint16_t px = pixels[i];
+      uint32_t r = (px >> 11) & 0x1F;
+      uint32_t g = (px >> 5) & 0x3F;
+      uint32_t b = px & 0x1F;
+      r = std::min<uint32_t>((r * 166) >> 7, 31);  // * 1.30
+      g = std::min<uint32_t>((g * 115) >> 7, 63);  // * 0.90
+      b = std::min<uint32_t>((b * 166) >> 7, 31);  // * 1.30
+      pixels[i] = static_cast<uint16_t>((r << 11) | (g << 5) | b);
+    }
+  }
+
   uint8_t requesters = single | stream;
   this->single_requesters_.store(0);
 
