@@ -567,3 +567,64 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   - User to cherry-pick/pull the fix, reflash, and confirm both that the PPA
     rotate warning no longer appears in the log and that the displayed image
     is no longer streaky/disturbed.
+
+    - **2026-09-19 (follow-up) — PPA fix alone wasn't enough: image was still
+      severely disturbed with color bands/splits/shifts (screenshot showed a very
+      dark, green-tinted, badly corrupted image).** No new I2C/DMA/PPA errors
+      appeared in the log this time, so the cause had to be something silent.
+      Investigated two theories in parallel:
+      1. **Row-stride mismatch.** Suspected the CSI/ISP pipeline might pad each
+         captured row to an alignment boundary (`bytesperline` > `width *
+         bytes_per_pixel`), which every downstream stage (PPA, JPEG encode, raw
+         pass-through) assumed was *not* the case (tightly-packed rows only).
+         Added defensive handling: `configure_format_()` now reads back
+         `format.fmt.pix.bytesperline` after `VIDIOC_S_FMT`, and a new
+         `destride_frame_()` helper repacks a captured frame into tightly-packed
+         rows before rotation/encoding/pass-through if the driver ever reports a
+         stride wider than the packed width (zero-copy no-op otherwise). Reading
+         `esp-video-components`' own `esp_video_set_format()` source, however,
+         showed it never actually writes a negotiated `bytesperline` back into the
+         caller's `v4l2_format` struct (the function takes a `const` pointer and
+         only forwards it to the sensor/ISP ops); in practice `capture_stride_`
+         will therefore always equal the packed size and `destride_frame_()` is a
+         no-op today. Kept as defensive code (harmless, in case a future esp_video
+         version does start reporting a real stride) but this was **not** the
+         actual cause.
+      2. **Missing ISP auto-exposure/auto-gain/auto-white-balance ("3A") pipeline
+         — this was the actual cause.** Found and reviewed an independent,
+         similar community project (github.com/sullb/esphome-p4-csi-camera) that
+         targets the same OV02C10 + ESP32-P4 ISP pipeline. Its code comments
+         explicitly state: *"The ISP demosaic produces green-biased output
+         without AWB"* and that AWB is normally handled by the `esp_ipa`
+         component "via `CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER`" — that
+         project works around the missing AWB by hand-correcting RGB565 pixels
+         with fixed gain multipliers. Checked `esp-video-components`' own
+         `esp_video/Kconfig`: `ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER` defaults
+         to **`n`**. Without it, no "isp_task" runs to read the ISP hardware's
+         statistics and feed them to `esp_ipa`'s auto exposure/auto gain/auto
+         white balance/color-correction algorithms - the ISP just performs a raw,
+         uncorrected demosaic. That precisely explains the reported symptoms: a
+         very dark image (no auto exposure/gain convergence), a green color cast
+         (Bayer's 2x green sample density showing through with no AWB), and
+         noisy/banded color patches (uncorrected demosaic + no denoising/color
+         correction). `esp_ipa` is already an automatic managed-component
+         dependency of `esp_video` on ESP32-P4 (`esp_video/idf_component.yml`),
+         and its individual algorithms (AWB/AGC/AEC/ACC/ADN/AF/ATC) all default
+         to enabled - only the pipeline controller task that drives them was
+         off.
+      - **Fix applied** in `components/mipi_csi_camera/__init__.py`: added
+        `add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER",
+        True)` alongside the existing MIPI-CSI/ISP video device options.
+      - **Verified** with a scratch compile: confirmed the build now compiles
+        `esp_video_isp_pipeline.c` (previously excluded when the controller was
+        off) and that the generated `sdkconfig` contains
+        `CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y` alongside the
+        already-enabled `CONFIG_ESP_IPA_AWB_ALGORITHM=y` /
+        `CONFIG_ESP_IPA_AGC_ALGORITHM=y`. Scratch test directory removed
+        afterward. Runtime image quality (does auto exposure/AWB actually
+        converge and produce a clean image) can only be confirmed on real
+        hardware.
+      - User to cherry-pick/pull the fix, reflash, and confirm the image is no
+        longer dark/green-tinted/banded. Auto exposure/AWB convergence may take a
+        moment after boot or after significant scene changes, so allow the image
+        a second or two to settle before judging quality.
