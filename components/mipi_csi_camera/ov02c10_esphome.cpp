@@ -8,13 +8,13 @@ namespace esphome::mipi_csi_camera::ov02c10 {
 
 static void *const detect_keep_alive_ __attribute__((used)) = reinterpret_cast<void *>(&ov02c10_detect);
 
-void force_link() {
+void Ov02c10Extension::force_link() {
   // Nothing to do at runtime - `detect_keep_alive_` above is what actually keeps the linker from
-  // dropping ov02c10.c. This function exists only so the generic mipi_csi_camera.cpp has a
-  // normal, named call site instead of needing to know about the keep-alive trick itself.
+  // dropping ov02c10.c. This method exists only so the generic mipi_csi_camera.cpp has a normal
+  // virtual call site instead of needing to know about the keep-alive trick itself.
 }
 
-void apply_rgb565_color_correction(uint16_t *pixels, size_t num_pixels) {
+void Ov02c10Extension::apply_rgb565_color_correction(uint16_t *pixels, size_t num_pixels) {
   for (size_t i = 0; i < num_pixels; i++) {
     uint16_t px = pixels[i];
     uint32_t r = (px >> 11) & 0x1F;
