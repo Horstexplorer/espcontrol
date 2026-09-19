@@ -651,6 +651,17 @@ void MipiCsiCamera::loop() {
     return;
 
   uint8_t *raw = this->capture_buffers_[index];
+
+  // The MIPI-CSI/ISP DMA engine wrote this buffer directly into PSRAM; that write is not
+  // automatically visible to the CPU data cache. Without invalidating the cache here, reads
+  // below can return a mix of the fresh DMA'd bytes and stale previously-cached bytes,
+  // producing exactly the kind of torn/shifted frames with per-frame color drift seen on
+  // hardware. Invalidate (memory -> cache) before touching the buffer at all.
+  esp_err_t cache_err = esp_cache_msync(raw, this->capture_buffer_size_, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+  if (cache_err != ESP_OK) {
+    ESP_LOGW(TAG, "Cache invalidate of captured frame failed: %s", esp_err_to_name(cache_err));
+  }
+
   uint16_t out_width = this->width_;
   uint16_t out_height = this->height_;
 

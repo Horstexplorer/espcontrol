@@ -886,3 +886,45 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
     free-function `ov02c10::force_link()`/`ov02c10::apply_rgb565_color_correction()`,
     and updated the per-mode-file mentions to reflect the single
     `ov02c10_settings.h`.
+
+- **Fixed the persistent torn/shifted-image bug (missing cache invalidation
+  after DMA capture)**: user reported that after the refactor, images were
+  still visibly torn/shifted with diagonal color-block artifacts, and colors
+  changed every other frame (an unreliable signal, so color-based debugging
+  of the artifact wasn't pursued further). Root-caused by re-reading the
+  V4L2 capture path in `mipi_csi_camera.cpp`:
+  - `capture_task()` dequeues a filled buffer via `VIDIOC_DQBUF` and hands
+    its index to `loop()` via `frame_queue_`; `loop()` then reads
+    `capture_buffers_[index]` directly (via `destride_frame_()` /
+    `rotate_frame_()` / JPEG-encode / raw pass-through).
+  - The MIPI-CSI/ISP DMA engine writes captured frames directly into PSRAM.
+    On the ESP32-P4, DMA writes to PSRAM are **not** automatically coherent
+    with the CPU data cache - the CPU can still see stale, previously-cached
+    bytes for that same buffer address until the cache is explicitly
+    invalidated for that range.
+  - The code already did this correctly for the *rotated* buffer (the PPA
+    hardware rotator's DMA output was invalidated via `esp_cache_msync(...,
+    ESP_CACHE_MSYNC_FLAG_DIR_M2C)` before use), but the **raw captured
+    buffer itself was never invalidated after `VIDIOC_DQBUF`** before any of
+    destride/rotate/encode touched it. This meant every frame was read as a
+    mix of fresh DMA'd bytes and stale cached bytes from a previous
+    read/frame - a near-perfect match for "torn/shifted image, colors change
+    every other frame" (the exact stale/fresh mix depends on unrelated cache
+    eviction activity elsewhere in the firmware, so it looked essentially
+    random from frame to frame).
+  - **Fix**: added an `esp_cache_msync(raw, this->capture_buffer_size_,
+    ESP_CACHE_MSYNC_FLAG_DIR_M2C)` call in `loop()` immediately after
+    obtaining the raw buffer pointer for the dequeued index, before any
+    processing touches it. This runs on whichever core executes `loop()`
+    (the actual consumer), matching the pattern already used for the PPA
+    rotate output.
+  - Verified via a scratch `esphome compile` (OV02C10, RGB565, rotation 90):
+    compiled and linked successfully. This is a data-correctness fix with no
+    build-time behavior change to verify other than compilation; the real
+    verification is on hardware.
+  - **Next**: ask the user to reflash and confirm whether the tearing is
+    resolved. If any residual artifact remains, the next suspects would be
+    the destride/rotate paths' own buffer handling (already cache-safe) or a
+    genuine capture-buffer-count/timing issue, but the missing invalidate on
+    the raw DMA buffer was the most direct explanation for the reported
+    symptom and had not been checked before.
