@@ -11,6 +11,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "esp_cache.h"
+#include "esp_private/esp_cache_private.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esphome/core/application.h"
@@ -427,7 +429,17 @@ uint8_t *MipiCsiCamera::rotate_frame_(uint8_t *src, uint16_t width, uint16_t hei
   *out_width = swap_dimensions ? height : width;
   *out_height = swap_dimensions ? width : height;
 
-  auto *dest = static_cast<uint8_t *>(heap_caps_malloc(frame_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  // The PPA hardware DMAs directly into `dest`, so it must satisfy the same
+  // cache-line alignment constraints as the JPEG encoder's buffers (both the
+  // start address and the allocated size); a plain `heap_caps_malloc()` does
+  // not guarantee this and causes `ppa_do_scale_rotate_mirror()` to fail with
+  // `ESP_ERR_INVALID_ARG` ("out.buffer addr or out.buffer_size not aligned to
+  // cache line size"), silently falling back to the unrotated frame.
+  size_t cache_line_size = 64;
+  esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &cache_line_size);
+  size_t aligned_size = (frame_size + cache_line_size - 1) & ~(cache_line_size - 1);
+  auto *dest = static_cast<uint8_t *>(
+      heap_caps_aligned_alloc(cache_line_size, aligned_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (dest == nullptr) {
     ESP_LOGW(TAG, "Not enough PSRAM to rotate frame; returning unrotated image");
     *out_width = width;
@@ -446,7 +458,7 @@ uint8_t *MipiCsiCamera::rotate_frame_(uint8_t *src, uint16_t width, uint16_t hei
   srm_config.in.srm_cm =
       this->pixel_format_ == MIPI_CSI_PIXEL_FORMAT_RGB565 ? PPA_SRM_COLOR_MODE_RGB565 : PPA_SRM_COLOR_MODE_RGB888;
   srm_config.out.buffer = dest;
-  srm_config.out.buffer_size = frame_size;
+  srm_config.out.buffer_size = aligned_size;
   srm_config.out.pic_w = *out_width;
   srm_config.out.pic_h = *out_height;
   srm_config.out.block_offset_x = 0;
@@ -478,6 +490,11 @@ uint8_t *MipiCsiCamera::rotate_frame_(uint8_t *src, uint16_t width, uint16_t hei
     *out_height = height;
     return src;
   }
+
+  // The PPA writes to `dest` via DMA, which does not automatically keep the CPU data cache coherent
+  // for PSRAM. Invalidate the CPU cache for the written range so subsequent reads (JPEG encoding or
+  // sending the raw frame to listeners) see the PPA's output rather than stale/uninitialized cache lines.
+  esp_cache_msync(dest, aligned_size, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
   return dest;
 }

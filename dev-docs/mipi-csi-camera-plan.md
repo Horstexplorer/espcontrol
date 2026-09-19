@@ -510,3 +510,60 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   example config to include both `id:` and `name:`. Scratch test directory
   removed afterward. User to add `name:` to their device YAML, reflash, and
   confirm the camera entity now appears in Home Assistant.
+
+- **2026-09-20 — Fixed severely streaky/disturbed image (PPA output buffer
+  cache-line alignment).** With the entity now visible, the user reported the
+  displayed image was badly corrupted. The provided hardware log showed the
+  PPA hardware rotator failing on essentially every captured frame:
+  `ppa_core: out.buffer addr or out.buffer_size not aligned to cache line
+  size` → `ESP_ERR_INVALID_ARG`, caught by the component's existing fallback
+  (`PPA rotate failed: ... returning unrotated image`). Two separate defects
+  were involved:
+  1. `rotate_frame_()`'s destination buffer was allocated with a plain
+     `heap_caps_malloc(frame_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`,
+     which does not guarantee the DMA2D/cache-line alignment (start address
+     *and* size) that `ppa_do_scale_rotate_mirror()` requires for its output
+     buffer per ESP-IDF's PPA documentation
+     (`docs/en/api-reference/peripherals/ppa.rst`, "Buffer Alignment"
+     section) — the same class of bug previously found and fixed for the
+     JPEG encoder's buffers, but never applied to the PPA rotation path.
+  2. Even once the PPA call succeeds, its output is written via DMA into
+     PSRAM; ESP-IDF drivers (e.g. `esp_driver_jpeg`) that do the same kind
+     of DMA-into-PSRAM pattern explicitly call `esp_cache_msync(...,
+     ESP_CACHE_MSYNC_FLAG_DIR_M2C)` afterwards to invalidate the CPU data
+     cache for that range before reading it back — without this, the CPU
+     (and the JPEG encoder reading from the rotated buffer) could observe
+     stale/uninitialized cache lines instead of the PPA's actual output,
+     which independently causes visual corruption.
+  - **Fix applied** in `mipi_csi_camera.cpp`'s `rotate_frame_()`:
+    - Added `#include "esp_cache.h"` and `#include
+      "esp_private/esp_cache_private.h"` (the latter is required for
+      `esp_cache_get_alignment()`'s declaration; without it the function is
+      undeclared even though `esp_cache.h` is included — confirmed via a
+      failing scratch compile before adding it).
+    - Replaced the destination buffer's `heap_caps_malloc()` with
+      `esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &cache_line_size)`
+      (64-byte fallback) followed by `heap_caps_aligned_alloc(cache_line_size,
+      aligned_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`, where
+      `aligned_size` rounds `frame_size` up to a `cache_line_size` multiple.
+    - Updated `srm_config.out.buffer_size` from `frame_size` to the new
+      `aligned_size` to match the actual allocated/aligned capacity.
+    - Added an `esp_cache_msync(dest, aligned_size,
+      ESP_CACHE_MSYNC_FLAG_DIR_M2C)` call immediately after a successful
+      `ppa_do_scale_rotate_mirror()`, before `dest` is returned to the
+      caller (JPEG encoder / raw-frame listeners), to invalidate the CPU
+      cache for the PPA's DMA output.
+  - The V4L2 capture buffer (`src`, the PPA's *input*) is left untouched —
+    it's managed by the `esp_video`/V4L2 driver's `DQBUF` path, which already
+    handles cache coherency for captured frames internally.
+  - **Verified** with a scratch compile (`tmp_test/test.yaml`, matching the
+    user's config: OV02C10, 1288x728, 1 data lane, RGB565, jpeg_quality 10,
+    rotation 90, `init_ldo: false`, plus a `name:` for the entity) — first
+    attempt failed with `'esp_cache_get_alignment' was not declared in this
+    scope` (missing the private header), second attempt after adding
+    `esp_private/esp_cache_private.h` compiled successfully
+    ("Successfully compiled program."). Scratch test directory removed
+    afterward. Runtime PPA behavior can only be confirmed on real hardware.
+  - User to cherry-pick/pull the fix, reflash, and confirm both that the PPA
+    rotate warning no longer appears in the log and that the displayed image
+    is no longer streaky/disturbed.
