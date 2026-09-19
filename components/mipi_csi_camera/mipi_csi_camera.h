@@ -216,7 +216,7 @@ class MipiCsiCamera final : public camera::Camera {
   int brightness_{0};
   int saturation_{0};
   uint8_t jpeg_quality_{0};
-  uint8_t frame_buffer_count_{2};
+  uint8_t frame_buffer_count_{3};
   bool init_ldo_{true};
 
   /* runtime state */

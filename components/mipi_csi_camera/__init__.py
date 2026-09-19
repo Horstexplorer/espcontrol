@@ -229,7 +229,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_JPEG_QUALITY, default=0): cv.Any(
                 cv.one_of(0), cv.int_range(min=6, max=63)
             ),
-            cv.Optional(CONF_FRAME_BUFFER_COUNT, default=2): cv.int_range(min=2, max=3),
+            cv.Optional(CONF_FRAME_BUFFER_COUNT, default=3): cv.int_range(min=2, max=4),
             # On the ESP32-P4, the MIPI-CSI PHY and the MIPI-DSI display PHY share the same
             # internal LDO regulator channel (channel 3, 2.5V). If the display is already
             # configured via ESPHome's `esp_ldo:` component, that channel is already powered and

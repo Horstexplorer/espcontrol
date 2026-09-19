@@ -266,6 +266,20 @@ bool MipiCsiCamera::configure_format_() {
 }
 
 bool MipiCsiCamera::allocate_buffers_() {
+  // capture_task() can legitimately hold up to two buffers outside the driver's free-list at
+  // once: one sitting consumed-but-unread in frame_queue_, and one actively being read by
+  // loop() (destride/rotate/JPEG-encode) after being pulled off that queue. With only 2 total
+  // buffers that leaves zero free for the CSI/ISP DMA engine to capture into during that
+  // window; some drivers cope by dropping the frame, but others keep writing regardless,
+  // tearing/overwriting a buffer that's still being read - producing torn, split-color frames.
+  // 3+ buffers are needed to guarantee at least one is always free for capture.
+  if (this->frame_buffer_count_ < 3) {
+    ESP_LOGW(TAG,
+             "frame_buffer_count is %u; 3 or more is strongly recommended to avoid the capture "
+             "buffer being overwritten mid-read, which shows up as torn/split-color frames",
+             this->frame_buffer_count_);
+  }
+
   struct v4l2_requestbuffers req{};
   req.count = this->frame_buffer_count_;
   req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
