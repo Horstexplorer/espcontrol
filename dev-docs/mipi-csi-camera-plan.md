@@ -1161,3 +1161,55 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   results from this retest are the most important signal yet in this
   investigation.
 
+- Hardware retest result: **no improvement** - image still streaked/torn,
+  and no "Dropping short frame" log lines (so frames are never reported
+  short by the driver). This ruled out the cache-invalidate theory as the
+  root cause (removing it was still correct - it was redundant - but it
+  wasn't the streaking mechanism).
+- **Systematic three-way diff (ours vs reference `esphome-p4-csi-camera`
+  vs vendor `video_lcd_display` demo)** - this found the actual answer:
+  - Sensor register tables: ours are byte-identical to the vendor's own
+    esp_cam_sensor ov02c10 driver (which our port came from) and
+    content-identical to the reference's tables. The misleading
+    "2lane...10fps" table name for the 1288x728 1-lane mode is just a
+    leftover label from the vendor's source; contents are the proper
+    1288x728 mode. NOT the bug.
+  - esp_video version: the vendor demo uses `~2.0` from the registry -
+    the SAME version we use (the reference uses git master, but the vendor
+    demo proves ~2.0 works). NOT the bug.
+  - ISP pipeline controller (esp_ipa 3A): esp_video's own Kconfig help
+    confirms it is only a statistics->algorithm->tuning task for image
+    *quality* (AE/AWB/AF); it does not touch the capture data path, so it
+    cannot cause streaks/shifts. Confirmed NOT the bug (our decision to
+    leave it off stands; note the vendor's esp_cam_sensor fork actually
+    DOES ship OV02C10 esp_ipa calibration JSONs
+    (`sensors/ov02c10/cfg/ov02c10_default_p4_eco4/eco5.json`) - so
+    re-enabling 3A WITH that calibration data is a viable future
+    color/exposure-quality improvement, revisited after the streaking is
+    fixed).
+  - **Data lanes: THE difference.** Every known-good configuration uses
+    TWO data lanes: the vendor demo
+    (`CONFIG_CAMERA_OV02C10_MIPI_RAW10_1920x1080_2LAN_30FPS=y`) and the
+    reference component (`data_lanes: 2`, auto-detect default mode).
+    Every failing configuration of ours used `data_lanes: 1` (1288x728
+    and 1920x1080 alike).
+  - Link budget math (from the vendor's own isp_info metadata):
+    - 1288x728 1-lane: pclk=81MHz x 10bit RAW = **810 Mbps payload** on a
+      400MHz DDR lane = **800 Mbps capacity** - undersized by ~1.2%
+      *before* CSI-2 packet overhead -> chronic sensor FIFO overrun.
+    - 1920x1080 1-lane: 810 Mbps payload vs 405MHz DDR = 810 Mbps -
+      exactly zero margin, overhead pushes it over.
+    - 1920x1080 2-lane (vendor demo): 840 Mbps payload vs 2x810 = 1620
+      Mbps capacity -> ~48% headroom. Clean.
+    A chronically overrun link drops/garbles bytes mid-frame at drifting
+    offsets - which produces exactly the reported symptoms: recognizable
+    image with streaks, horizontal splits/shifts, repeated bands, and
+    colors that drift frame-to-frame; and it is immune to every
+    software-side fix we tried (buffers, stride, cache, rotation,
+    framerate) because the loss happens on the wire before any software
+    sees the data.
+  - **Action (pure YAML change, no code change needed - our component
+    already ships the vendor's byte-identical 2-lane table):**
+    `resolution: 1920x1080, data_lanes: 2` - exactly the vendor demo's
+    proven mode. **Awaiting user hardware retest.**
+

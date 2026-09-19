@@ -139,6 +139,16 @@ else is rejected at config-validation time:
 | `1920x1080`   | `1`          | `RAW10`               | `30`        |
 | `1920x1080`   | `2`          | `RAW10`               | `30`        |
 
+> **Prefer the 2-lane mode.** Both 1-lane modes run the MIPI link at
+> ~100% of its capacity (the sensor pushes ~810 Mbps of RAW10 payload onto
+> a single 400/405 MHz DDR lane that carries only ~800/810 Mbps before
+> protocol overhead), so the sensor's output FIFO chronically overruns and
+> frames arrive with streaks, shifted bands and torn lines. The 2-lane
+> 1920x1080 mode has ~2x headroom and is what the panel vendor's own
+> demo application (`video_lcd_display`, which is tear-free) uses. Treat
+> the 1-lane modes as last-resort fallbacks for boards that physically
+> wire only one lane.
+
 As with the other sensors, any ISP output format (`GRAYSCALE`/`RGB565`/
 `RGB888`/`YUV422`/`YUV420`) can be requested at the same resolution/framerate
 instead of `RAW10`.
