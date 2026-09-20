@@ -142,6 +142,7 @@ class MipiCsiCamera final : public camera::Camera {
   /// `false` when another component (usually the display) already powers
   /// this rail; defaults to `true` (this component powers it itself).
   void set_init_ldo(bool init_ldo) { this->init_ldo_ = init_ldo; }
+  void set_isp_pipeline_controller(bool enabled) { this->isp_pipeline_controller_ = enabled; }
 
   /* ---- Component ---- */
   void setup() override;
@@ -227,6 +228,10 @@ class MipiCsiCamera final : public camera::Camera {
   uint8_t jpeg_quality_{0};
   uint8_t frame_buffer_count_{3};
   bool init_ldo_{true};
+  /// Whether esp_video's ISP pipeline controller (esp_ipa 3A algorithms with per-sensor JSON
+  /// calibration) is enabled. When it is, the ISP already produces properly exposed/white-balanced
+  /// frames, so any fixed manual color correction (see sensor extensions) must be skipped.
+  bool isp_pipeline_controller_{true};
 
   /* runtime state */
   int video_fd_{-1};

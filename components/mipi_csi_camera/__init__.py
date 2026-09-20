@@ -1,4 +1,6 @@
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from esphome import automation, pins
@@ -20,6 +22,7 @@ from esphome.const import (
 from esphome.core import CORE
 from esphome.core.entity_helpers import setup_entity
 import esphome.final_validate as fv
+from esphome.helpers import write_file_if_changed
 from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
@@ -123,6 +126,8 @@ CONF_INIT_LDO = "init_ldo"
 CONF_ON_STREAM_START = "on_stream_start"
 CONF_ON_STREAM_STOP = "on_stream_stop"
 CONF_ON_IMAGE = "on_image"
+
+CONF_ISP_PIPELINE_CONTROLLER = "isp_pipeline_controller"
 
 camera_range_param = cv.int_range(min=-2, max=2)
 
@@ -236,6 +241,15 @@ CONFIG_SCHEMA = cv.All(
             # will reject a second exclusive acquire attempt. Set this to `false` in that case;
             # leave it at the default `true` if this is the only consumer of that LDO channel.
             cv.Optional(CONF_INIT_LDO, default=True): cv.boolean,
+            # Enables esp_video's ISP pipeline controller (the esp_ipa-driven task that runs
+            # auto exposure/gain/white-balance/color-correction against per-sensor JSON
+            # calibration data). All three supported sensors have calibration data available
+            # (SC2336/OV5647 ship theirs in the esp_cam_sensor managed component, which registers
+            # it automatically; OV02C10's is vendored in this component's directory and gets
+            # registered via a generated project_include.cmake, see to_code()). Without it the
+            # ISP only does a plain demosaic: dark, green-tinted images with sensor-internal AEC
+            # hunting between frames. Disable only for debugging.
+            cv.Optional(CONF_ISP_PIPELINE_CONTROLLER, default=True): cv.boolean,
             cv.Optional(CONF_ON_STREAM_START): automation.validate_automation(
                 {
                     cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
@@ -330,6 +344,7 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_data_lanes(config[CONF_DATA_LANES]))
     cg.add(var.set_rotation(config[CONF_ROTATION]))
     cg.add(var.set_xclk_frequency(int(config[CONF_XCLK_FREQUENCY])))
+    cg.add(var.set_isp_pipeline_controller(config[CONF_ISP_PIPELINE_CONTROLLER]))
 
     for key, setter in SETTERS.items():
         if key in config:
@@ -370,15 +385,43 @@ async def to_code(config: ConfigType) -> None:
     # FIFO overflow ever does happen again (option added in esp_video 2.4.0 for
     # exactly this purpose): lose the error log, keep the device alive.
     add_idf_sdkconfig_option("CONFIG_ESP_VIDEO_DISABLE_ISP_ERROR_INTERRUPT", True)
-    # NOTE: CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER (the esp_ipa-driven auto exposure/
-    # gain/white-balance task) was tried here and reverted - see dev-docs/mipi-csi-camera-plan.md.
-    # esp_ipa's AWB/AGC/color-correction algorithms are tuned via per-sensor JSON calibration data
-    # (esp_cam_sensor/sensors/<name>/cfg/<name>_default.json for SC2336/OV5647/OV2710); OV02C10 has
-    # no such calibration data (it isn't in the official esp_cam_sensor registry at all), so
-    # enabling the controller made the image *worse* - a fully-saturated solid-color frame instead
-    # of a dark/green-tinted one - because the 3A algorithms had no valid tuning to work from.
+    # The ISP pipeline controller runs the esp_ipa 3A algorithms (auto exposure/gain/
+    # white-balance/color-correction) from per-sensor JSON calibration data. It was
+    # previously disabled because OV02C10 had no calibration data, which made images
+    # worse; the calibration JSONs are vendored in this component now (see below), so
+    # it can be safely enabled - matching the panel vendor's own demo application,
+    # which runs with it on. See dev-docs/mipi-csi-camera-plan.md.
+    add_idf_sdkconfig_option(
+        "CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER",
+        config[CONF_ISP_PIPELINE_CONTROLLER],
+    )
     add_idf_sdkconfig_option("CONFIG_CAMERA_SC2336", config[CONF_SENSOR] == "SC2336")
     add_idf_sdkconfig_option("CONFIG_CAMERA_OV5647", config[CONF_SENSOR] == "OV5647")
+
+    if config[CONF_ISP_PIPELINE_CONTROLLER] and config[CONF_SENSOR] == "OV02C10":
+        # esp_ipa compiles each sensor's JSON calibration data into the firmware from the
+        # global ESP_IPA_JSON_CONFIG_FILE_PATH build property, which esp_cam_sensor's own
+        # project_include.cmake registers for the sensors it ships. OV02C10 is vendored
+        # directly in this component (it isn't in the esp_cam_sensor registry), so its
+        # project_include.cmake never runs - register the vendored JSON ourselves by
+        # generating a project_include.cmake into ESPHome's main component directory
+        # (external component dirs don't get their own project_include.cmake processed,
+        # since ESPHome merges them into the single "src"/main component). The JSONs are
+        # verbatim copies from Espressif's esp_cam_sensor OV02C10 driver (Apache-2.0).
+        component_dir = os.path.dirname(os.path.abspath(__file__)).replace(os.sep, "/")
+        project_include = (
+            "# Generated by the mipi_csi_camera ESPHome component: registers the vendored\n"
+            "# OV02C10 esp_ipa calibration data (see components/mipi_csi_camera/__init__.py).\n"
+            "if (CONFIG_ESP32P4_SELECTS_REV_LESS_V3)\n"
+            f'    idf_build_set_property(ESP_IPA_JSON_CONFIG_FILE_PATH "{component_dir}/ov02c10_default_p4_eco4.json" APPEND)\n'
+            "else()\n"
+            f'    idf_build_set_property(ESP_IPA_JSON_CONFIG_FILE_PATH "{component_dir}/ov02c10_default_p4_eco5.json" APPEND)\n'
+            "endif()\n"
+        )
+        write_file_if_changed(
+            Path(CORE.build_path) / "src" / "project_include.cmake",
+            project_include,
+        )
 
     if config[CONF_SENSOR] == "OV02C10":
         # OV02C10 isn't in the espressif/esp_cam_sensor managed component

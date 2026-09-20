@@ -782,16 +782,13 @@ void MipiCsiCamera::loop() {
     heap_caps_free(destrided);  // superseded by rotate_frame_'s own output buffer
   bool rotated_copy = frame_data != raw;
 
-  // The ISP's automatic 3A pipeline (auto exposure/gain/white balance) needs per-sensor
-  // calibration data that some sensors (e.g. OV02C10) don't have (it isn't in Espressif's
-  // official esp_cam_sensor registry), so it isn't enabled here - see
-  // dev-docs/mipi-csi-camera-plan.md for why enabling it made the image worse, not better.
-  // Without it, the ISP's plain demosaic output can have a visible green cast (Bayer's 2x green
-  // sample density); sensor extensions that need a correction for this hook in here via
-  // apply_rgb565_color_correction() (see mipi_csi_camera_sensor_extension.h). Sensors that don't
-  // need one (get_sensor_extension() returned nullptr, or their extension leaves the default
-  // no-op) are unaffected.
-  if (this->sensor_extension_ != nullptr && this->pixel_format_ == MIPI_CSI_PIXEL_FORMAT_RGB565) {
+  // The ISP's automatic 3A pipeline (auto exposure/gain/white balance) now runs with per-sensor
+  // calibration data (isp_pipeline_controller), so it produces properly exposed/white-balanced
+  // frames on its own. The fixed manual per-channel correction below only remains as a fallback
+  // for when the pipeline controller is explicitly disabled (plain demosaic output then has a
+  // visible green cast from Bayer's 2x green sample density).
+  if (!this->isp_pipeline_controller_ && this->sensor_extension_ != nullptr &&
+      this->pixel_format_ == MIPI_CSI_PIXEL_FORMAT_RGB565) {
     this->sensor_extension_->apply_rgb565_color_correction(reinterpret_cast<uint16_t *>(frame_data),
                                                              frame_size / 2);
   }
@@ -865,6 +862,9 @@ void MipiCsiCamera::dump_config() {
   if (this->ppa_handle_ == nullptr && this->rotation_ != 0) {
     ESP_LOGW(TAG, "  Rotation requested but PPA is unavailable; frames will be delivered unrotated");
   }
+
+  ESP_LOGCONFIG(TAG, "  ISP Pipeline Controller (auto exposure/white balance): %s",
+                YESNO(this->isp_pipeline_controller_));
 
   if (this->jpeg_quality_ > 0) {
     ESP_LOGCONFIG(TAG, "  JPEG Re-encoding: quality %u (%s)", this->jpeg_quality_,

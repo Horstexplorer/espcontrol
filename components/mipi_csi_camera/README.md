@@ -104,6 +104,7 @@ mipi_csi_camera:
 | `jpeg_quality`         | no       | `0`     | `0` disables JPEG re-encoding; `6`-`63` re-encodes the ISP's output (RGB565/RGB888/YUV422/YUV420/GRAYSCALE only, using the ESP32-P4's hardware JPEG encoder) so it can be viewed in Home Assistant/the API. Lower numbers mean higher quality (same inverted scale as `esp32_camera`'s `jpeg_quality`). Requires an `psram:` component; not valid with `RAW8`/`RAW10`. |
 | `frame_buffer_count`   | no       | `3`     | Number of V4L2 capture buffers (2-4). 3+ is strongly recommended: with only 2, `capture_task()`/`loop()` can end up holding both buffers outside the driver's free-list simultaneously (one queued-but-unread, one actively being processed), leaving none free for the CSI/ISP DMA engine - some drivers then overwrite a buffer while it's still being read, producing torn/split-color frames. |
 | `init_ldo`             | no       | `true`  | Whether this component should power the shared MIPI PHY LDO regulator (channel 3, 2.5V on the ESP32-P4). Set to `false` if an `esp_ldo:` component elsewhere in your config (typically for the MIPI-DSI display) already powers that same channel — acquiring it twice fails with `esp_ldo_acquire_channel(...): can't acquire the channel, already in use by others or not adjustable`. |
+| `isp_pipeline_controller` | no    | `true`  | Enables esp_video's ISP pipeline controller: a task running the esp_ipa auto exposure/gain/white-balance/color-correction algorithms from per-sensor JSON calibration data (shipped with all three supported sensors; OV02C10's is vendored in this component). This is what the panel vendor's own demo uses — without it the image is dark, green-tinted, and pumps in brightness between frames. Disable only for debugging. |
 
 Automations: `on_image` (`CameraImageData image` with `data`/`length`),
 `on_stream_start`, `on_stream_stop`.
@@ -157,23 +158,22 @@ instead of `RAW10`.
 
 ### OV02C10 color correction
 
-The ESP32-P4's ISP performs a plain demosaic (Bayer → RGB conversion) with no
-auto exposure/gain/white-balance/color-correction unless the `esp_ipa`-driven
-auto pipeline (`CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER`) is enabled -
-and that pipeline needs per-sensor JSON calibration data
-(`esp_cam_sensor/sensors/<name>/cfg/<name>_default.json`) that only exists for
-sensors in the official `esp_cam_sensor` registry (SC2336/OV5647/OV2710).
-OV02C10 isn't in that registry, so enabling the auto pipeline for it produces
-a far worse image (a fully-saturated solid-color frame) rather than a better
-one - see `dev-docs/mipi-csi-camera-plan.md` for the investigation. Instead,
-when `pixel_format: RGB565` is used with OV02C10, `MipiCsiCamera::loop()`
-calls into `Ov02c10Extension::apply_rgb565_color_correction()`
-(`ov02c10_esphome.cpp`), which applies a small fixed per-channel gain
-correction to counteract the plain demosaic's visible green cast (Bayer
-sensors sample green at 2x the rate of red/blue). This is a static
-approximation, not real auto white balance, so exposure
-still comes solely from the sensor's built-in per-mode register defaults (no
-closed-loop auto exposure).
+With `isp_pipeline_controller: true` (the default), the esp_ipa auto
+exposure/gain/white-balance/color-correction pipeline runs using the vendored
+OV02C10 calibration data (`ov02c10_default_p4_eco4.json` /
+`ov02c10_default_p4_eco5.json`, verbatim Apache-2.0 copies from Espressif's
+esp_cam_sensor OV02C10 driver - the sensor isn't in the managed component
+registry, so unlike SC2336/OV5647 its JSON can't be auto-registered from
+there and is instead registered via a generated `project_include.cmake`, see
+`__init__.py`). This is the same setup the panel vendor's own demo uses.
+
+Only if the pipeline controller is explicitly disabled does the fallback
+kick in: `Ov02c10Extension::apply_rgb565_color_correction()`
+(`ov02c10_esphome.cpp`) applies a small fixed per-channel gain correction to
+counteract the plain demosaic's visible green cast (Bayer sensors sample
+green at 2x the rate of red/blue). That is a static approximation, not real
+auto white balance, and exposure then comes solely from the sensor's
+built-in per-mode register defaults (no closed-loop auto exposure).
 
 ## Notes on the SCCB (camera I2C) bus
 

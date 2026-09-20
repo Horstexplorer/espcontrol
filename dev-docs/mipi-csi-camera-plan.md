@@ -1282,3 +1282,37 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   of per-frame memcpy+alloc churn. Verified via scratch `esphome compile`
   (1920x1080, 2 lanes). **Awaiting user hardware retest.**
 
+- Retest result: **no more crash, no more `fifo overflow`** - but frames
+  still showed tearing, and brightness/colors shifted from frame to frame.
+  The attached snapshot showed a structurally intact frame (recognizable
+  scene, no splits/bands) that was badly underexposed and color-drifting -
+  i.e. the *capture* path is healthy now and the remaining issue is image
+  *quality/stability*, which is exactly what the ISP pipeline controller
+  (esp_ipa 3A: auto exposure/gain/white balance) exists to fix. Both
+  known-good references (vendor demo AND esphome-p4-csi-camera) run with
+  it enabled; we had it disabled because OV02C10 previously had no esp_ipa
+  calibration data, and enabling 3A without calibration made things worse.
+- **Calibration data found**: the vendor's bundled esp_cam_sensor fork
+  ships OV02C10 esp_ipa calibration JSONs
+  (`sensors/ov02c10/cfg/ov02c10_default_p4_eco4.json` (10KB) and
+  `ov02c10_default_p4_eco5.json` (204KB), Apache-2.0). Mechanism:
+  esp_cam_sensor's `project_include.cmake` registers each enabled sensor's
+  JSON into the global `ESP_IPA_JSON_CONFIG_FILE_PATH` build property, and
+  esp_ipa's CMakeLists compiles it into `esp_video_ipa_config.c`. Our
+  vendored OV02C10 driver bypasses esp_cam_sensor's build, so nothing ever
+  registered its JSON.
+- **Fix implemented**: vendored both JSONs into the component, added a new
+  `isp_pipeline_controller` YAML option (default `true`), wired
+  `CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER` to it, and - because
+  ESPHome merges external components into the single `src` main component
+  (so a `project_include.cmake` in our own directory would never be
+  processed) - the Python codegen now *generates* a `project_include.cmake`
+  into the main component directory that registers the right JSON
+  (eco4/eco5 selected by `CONFIG_ESP32P4_SELECTS_REV_LESS_V3`, same gate
+  the vendor uses). The manual fixed green-cast correction is now skipped
+  when the pipeline is enabled (real AWB supersedes it). Verified end to
+  end in a scratch build: `CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y`,
+  the IPA config generator ran, and the generated `esp_video_ipa_config.c`
+  contains the OV02C10 calibration arrays. **Awaiting user hardware
+  retest** - expectation: correct exposure, stable colors, no pumping.
+
