@@ -1321,7 +1321,19 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   became unusable - WiFi/API never came up. Cause: the esp_ipa algorithms
   log ~10 DEBUG lines per frame each (~1500 lines in 14s, hundreds per
   second); on a DEBUG-level ESPHome config that logger flood starves the
-  main loop. **Fix**: clamp the `esp_ipa_*` log tags to WARN in setup()
-  when the pipeline controller is enabled. Verified via scratch
+  main loop. First fix attempt: clamp the `esp_ipa_*` log tags to WARN via
+  esp_log_level_set() in setup().
+- Retest of the clamp: **no effect** - same spam, and this time the device
+  crashed with a task watchdog reset: loopTask starved while isp_task sat
+  inside `uart_tx_all` (decoded from the register dump). Root cause of the
+  clamp failing: ESPHome builds with `CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=n`
+  (esphome/components/esp32/__init__.py), which makes `esp_log_level_set()`
+  a no-op at runtime.
+- **Second fix**: wrap the installed vprintf handler
+  (`esp_log_set_vprintf`, saving the previous one) and drop DEBUG/VERBOSE
+  messages whose tag starts with `esp_ipa` - the IDF log formatter embeds
+  level and tag in the format string itself (`D (12345) esp_ipa_agc: ...`,
+  optionally ANSI-color-prefixed), so filtering there works regardless of
+  the dynamic-level-control setting. Verified via scratch
   `esphome compile`. **Awaiting user hardware retest.**
 
