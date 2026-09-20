@@ -202,11 +202,11 @@ class MipiCsiCamera final : public camera::Camera {
   /// bytes as JPEG). Only available for the ISP-produced formats the hardware encoder accepts
   /// (RGB565/RGB888/YUV422/YUV420/GRAYSCALE) - RAW8/RAW10 can't be encoded directly. Returns
   /// nullptr (falling back to sending the raw/rotated buffer as-is) if jpeg_quality is 0, the
-  /// pixel format isn't supported, or the encoder failed; the returned buffer (on success) is
-  /// heap_caps_free()-owned by the caller.
+  /// pixel format isn't supported, or the encoder failed. On success returns jpeg_out_buf_ -
+  /// a persistent buffer owned by this component (NOT to be freed by the caller); it stays
+  /// valid until the next encode_jpeg_() call.
   uint8_t *encode_jpeg_(const uint8_t *src, uint16_t width, uint16_t height, size_t src_size, size_t *out_size);
   size_t bytes_per_pixel_() const;
-
   /* configuration */
   i2c::I2CBus *external_i2c_bus_{nullptr};
   MipiCsiSensorModel sensor_model_{MIPI_CSI_SENSOR_SC2336};
@@ -241,6 +241,14 @@ class MipiCsiCamera final : public camera::Camera {
   bool streaming_{false};
   ppa_client_handle_t ppa_handle_{nullptr};
   jpeg_encoder_handle_t jpeg_encoder_{nullptr};
+  /// Persistent JPEG encoder buffers, allocated once in setup() (the input one lazily on first
+  /// use). Allocating ~2x a full-resolution frame per captured frame churned PSRAM badly enough
+  /// that `jpeg_alloc_encoder_mem()` started failing once the display/LVGL had fragmented the
+  /// heap; one up-front allocation while PSRAM is still contiguous avoids that entirely.
+  uint8_t *jpeg_out_buf_{nullptr};
+  size_t jpeg_out_buf_size_{0};
+  uint8_t *jpeg_in_buf_{nullptr};
+  size_t jpeg_in_buf_size_{0};
   esp_err_t init_error_{0 /* ESP_OK */};
   const char *setup_failure_reason_{nullptr};
   /// Optional sensor-specific hook (see mipi_csi_camera_sensor_extension.h); nullptr for sensors

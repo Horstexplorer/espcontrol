@@ -1261,3 +1261,24 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   to `~2.4.1` (which also contains the FIFO-overflow fix) is a one-line
   change.
 
+- Hardware retest with esp_video 2.5.0: **the FIFO overflows and the WDT
+  crash are gone** - streaming runs stable. New failure instead:
+  `Failed to allocate JPEG output buffer (4147200 bytes)` every frame at
+  1920x1080. Cause: `encode_jpeg_()` allocated *both* a ~4.1MB input copy
+  buffer and a ~4.1MB output buffer via `jpeg_alloc_encoder_mem()` on
+  every single frame, and freed them right after - by the time the camera
+  streams, the display/LVGL stack has fragmented PSRAM enough (~10MB free
+  total, but no contiguous 4.1MB block left) that these per-frame
+  allocations fail. (1288x728 never hit this because its ~1.9MB buffers
+  still fit in the fragmented heap.)
+- **Fix**: persistent buffers, same pattern as the reference component -
+  the output buffer is allocated once in `setup()` (while PSRAM is still
+  contiguous, failing fast with a clear log line if even that doesn't
+  fit) and reused for every frame; `encode_jpeg_()` now encodes directly
+  from the source buffer (V4L2 capture / PPA rotate buffers are
+  cache-line aligned in practice, like in the reference component) and
+  only falls back to a lazily-allocated persistent input copy buffer if
+  the driver rejects the source as misaligned. This also removes ~8.3MB
+  of per-frame memcpy+alloc churn. Verified via scratch `esphome compile`
+  (1920x1080, 2 lanes). **Awaiting user hardware retest.**
+

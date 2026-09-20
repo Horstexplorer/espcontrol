@@ -212,6 +212,21 @@ void MipiCsiCamera::setup() {
       ESP_LOGW(TAG, "JPEG encoder engine creation failed (%s); frames will be sent unencoded",
                esp_err_to_name(jpeg_err));
       this->jpeg_encoder_ = nullptr;
+    } else {
+      // Allocate the persistent output buffer up front, while PSRAM is still contiguous
+      // (per-frame allocation failed once the display stack fragmented the heap). Worst-case
+      // JPEG output can approach the raw input size for very noisy scenes, so size it to a
+      // full frame; rotation doesn't change the pixel count.
+      size_t frame_bytes = static_cast<size_t>(this->width_) * this->height_ * this->bytes_per_pixel_();
+      jpeg_encode_memory_alloc_cfg_t out_mem_cfg = {.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER};
+      this->jpeg_out_buf_ = static_cast<uint8_t *>(
+          jpeg_alloc_encoder_mem(frame_bytes, &out_mem_cfg, &this->jpeg_out_buf_size_));
+      if (this->jpeg_out_buf_ == nullptr) {
+        ESP_LOGW(TAG, "Failed to allocate JPEG output buffer (%u bytes); frames will be sent unencoded",
+                 static_cast<unsigned>(frame_bytes));
+        jpeg_del_encoder_engine(this->jpeg_encoder_);
+        this->jpeg_encoder_ = nullptr;
+      }
     }
   }
 
@@ -407,6 +422,11 @@ void MipiCsiCamera::on_shutdown() {
     jpeg_del_encoder_engine(this->jpeg_encoder_);
     this->jpeg_encoder_ = nullptr;
   }
+
+  heap_caps_free(this->jpeg_out_buf_);
+  this->jpeg_out_buf_ = nullptr;
+  heap_caps_free(this->jpeg_in_buf_);
+  this->jpeg_in_buf_ = nullptr;
 
   for (auto *buffer : this->capture_buffers_) {
     if (buffer != nullptr)
@@ -610,30 +630,12 @@ uint8_t *MipiCsiCamera::encode_jpeg_(const uint8_t *src, uint16_t width, uint16_
       return nullptr;
   }
 
-  // The hardware JPEG encoder's DMA2D engine requires *both* its input and output buffers to
-  // satisfy specific cache-line/DMA2D alignment constraints (see esp_driver_jpeg's
-  // jpeg_encoder_process()); our V4L2/PPA-rotated buffers aren't guaranteed to meet that, so copy
-  // the source frame into a freshly `jpeg_alloc_encoder_mem()`-allocated input buffer first.
-  jpeg_encode_memory_alloc_cfg_t in_mem_cfg = {.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER};
-  size_t in_capacity = 0;
-  auto *in_buf = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(src_size, &in_mem_cfg, &in_capacity));
-  if (in_buf == nullptr) {
-    ESP_LOGW(TAG, "Failed to allocate JPEG input buffer (%u bytes)", static_cast<unsigned>(src_size));
-    return nullptr;
-  }
-  memcpy(in_buf, src, src_size);
-
-  // In the worst case (very high-entropy/noisy scenes) the compressed output can approach the
-  // raw input size; size the output buffer the same as the input to stay safe.
-  jpeg_encode_memory_alloc_cfg_t out_mem_cfg = {.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER};
-  size_t out_capacity = 0;
-  auto *out_buf = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(src_size, &out_mem_cfg, &out_capacity));
-  if (out_buf == nullptr) {
-    ESP_LOGW(TAG, "Failed to allocate JPEG output buffer (%u bytes)", static_cast<unsigned>(src_size));
-    heap_caps_free(in_buf);
-    return nullptr;
-  }
-
+  // The hardware JPEG encoder's DMA2D engine requires both buffers to satisfy DMA2D/cache-line
+  // alignment constraints (see esp_driver_jpeg's jpeg_encoder_process()). The persistent output
+  // buffer (allocated in setup()) always qualifies. The V4L2 capture and PPA output buffers are
+  // cache-line aligned in practice, so try encoding directly from `src` first; only if the
+  // driver rejects it as misaligned (ESP_ERR_INVALID_ARG) fall back to copying through the
+  // persistent input buffer (allocated lazily, once).
   jpeg_encode_cfg_t encode_cfg = {};
   encode_cfg.height = height;
   encode_cfg.width = width;
@@ -643,18 +645,44 @@ uint8_t *MipiCsiCamera::encode_jpeg_(const uint8_t *src, uint16_t width, uint16_
   // (lower value = higher quality); the hardware encoder instead wants 1-100, higher = better.
   encode_cfg.image_quality = 100 - this->jpeg_quality_;
 
+  if (src_size > this->jpeg_out_buf_size_) {
+    ESP_LOGW(TAG, "Frame (%u bytes) larger than JPEG output buffer (%u bytes)",
+             static_cast<unsigned>(src_size), static_cast<unsigned>(this->jpeg_out_buf_size_));
+    return nullptr;
+  }
+
   uint32_t encoded_size = 0;
-  esp_err_t err = jpeg_encoder_process(this->jpeg_encoder_, &encode_cfg, in_buf, static_cast<uint32_t>(src_size),
-                                       out_buf, static_cast<uint32_t>(out_capacity), &encoded_size);
-  heap_caps_free(in_buf);
+  esp_err_t err = jpeg_encoder_process(this->jpeg_encoder_, &encode_cfg, src, static_cast<uint32_t>(src_size),
+                                       this->jpeg_out_buf_, static_cast<uint32_t>(this->jpeg_out_buf_size_),
+                                       &encoded_size);
+
+  if (err == ESP_ERR_INVALID_ARG) {
+    // Misaligned/unacceptable source buffer: route the frame through the persistent
+    // encoder-aligned input buffer and retry once.
+    if (this->jpeg_in_buf_ == nullptr || this->jpeg_in_buf_size_ < src_size) {
+      heap_caps_free(this->jpeg_in_buf_);
+      this->jpeg_in_buf_ = nullptr;
+      jpeg_encode_memory_alloc_cfg_t in_mem_cfg = {.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER};
+      this->jpeg_in_buf_ = static_cast<uint8_t *>(
+          jpeg_alloc_encoder_mem(src_size, &in_mem_cfg, &this->jpeg_in_buf_size_));
+      if (this->jpeg_in_buf_ == nullptr) {
+        ESP_LOGW(TAG, "Failed to allocate JPEG input buffer (%u bytes)", static_cast<unsigned>(src_size));
+        return nullptr;
+      }
+    }
+    memcpy(this->jpeg_in_buf_, src, src_size);
+    err = jpeg_encoder_process(this->jpeg_encoder_, &encode_cfg, this->jpeg_in_buf_,
+                               static_cast<uint32_t>(src_size), this->jpeg_out_buf_,
+                               static_cast<uint32_t>(this->jpeg_out_buf_size_), &encoded_size);
+  }
+
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "JPEG encode failed: %s", esp_err_to_name(err));
-    heap_caps_free(out_buf);
     return nullptr;
   }
 
   *out_size = encoded_size;
-  return out_buf;
+  return this->jpeg_out_buf_;
 }
 
 /* ---------------- Camera interface ---------------- */
@@ -783,7 +811,8 @@ void MipiCsiCamera::loop() {
         heap_caps_free(frame_data);  // fully consumed by the encoder now; no longer needed
       send_data = jpeg_data;
       send_length = jpeg_length;
-      send_data_owned = true;
+      // jpeg_data is the component-owned persistent output buffer - it must NOT be freed here.
+      send_data_owned = false;
     }
     // On encode failure, fall through and send the raw/rotated buffer instead - still usable by
     // on_image automations even if Home Assistant can't display it as a JPEG.
