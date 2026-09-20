@@ -15,6 +15,7 @@
 #include "esp_private/esp_cache_private.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -178,6 +179,17 @@ void MipiCsiCamera::setup() {
 
   esp_video_init_config_t init_config = {};
   init_config.csi = csi_config;
+
+  if (this->isp_pipeline_controller_) {
+    // The esp_ipa algorithms log their per-frame statistics at DEBUG level - roughly 10 lines
+    // per frame, i.e. hundreds of lines per second while streaming. On a DEBUG-level config
+    // that flood is enough to starve the main loop (WiFi/API never came up during hardware
+    // testing). Clamp the esp_ipa tags to WARN; everything else keeps the user's global level.
+    for (const char *tag : {"esp_ipa_ian", "esp_ipa_awb", "esp_ipa_agc", "esp_ipa_acc", "esp_ipa_adn",
+                            "esp_ipa_aen", "esp_ipa_atc", "esp_ipa_af", "esp_ipa_ext"}) {
+      esp_log_level_set(tag, ESP_LOG_WARN);
+    }
+  }
 
   this->init_error_ = esp_video_init(&init_config);
   if (this->init_error_ != ESP_OK) {

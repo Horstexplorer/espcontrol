@@ -1316,3 +1316,12 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   contains the OV02C10 calibration arrays. **Awaiting user hardware
   retest** - expectation: correct exposure, stable colors, no pumping.
 
+- Retest result: the pipeline itself works (auto exposure converged:
+  luma climbed 11 -> 42 against target 45 and held there), BUT the device
+  became unusable - WiFi/API never came up. Cause: the esp_ipa algorithms
+  log ~10 DEBUG lines per frame each (~1500 lines in 14s, hundreds per
+  second); on a DEBUG-level ESPHome config that logger flood starves the
+  main loop. **Fix**: clamp the `esp_ipa_*` log tags to WARN in setup()
+  when the pipeline controller is enabled. Verified via scratch
+  `esphome compile`. **Awaiting user hardware retest.**
+
