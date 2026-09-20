@@ -1,4 +1,4 @@
-#ifdef USE_ESP32_VARIANT_ESP32P4
+﻿#ifdef USE_ESP32_VARIANT_ESP32P4
 
 #include "mipi_csi_camera.h"
 
@@ -62,26 +62,6 @@ static void invalidate_cache_chunked(void *addr, size_t size) {
   }
 }
 
-// vprintf wrapper that drops DEBUG/VERBOSE messages from the esp_ipa_* algorithm tags. The IDF
-// log formatter embeds level and tag into the format string itself ("D (12345) esp_ipa_agc: ...",
-// optionally prefixed with ANSI color escapes), so the filter works even though ESPHome builds
-// with CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=n (which makes esp_log_level_set() a no-op).
-static vprintf_like_t s_prev_vprintf = nullptr;
-
-static int esp_ipa_log_filter_vprintf_(const char *format, va_list args) {
-  const char *paren = strchr(format, '(');
-  if (paren != nullptr && paren >= format + 2 && paren[-1] == ' ' &&
-      (paren[-2] == 'D' || paren[-2] == 'V') && strstr(format, ") esp_ipa_") != nullptr) {
-    return 0;  // drop the esp_ipa per-frame statistics spam
-  }
-  return s_prev_vprintf(format, args);
-}
-
-static void esp_ipa_log_filter_install_() {
-  if (s_prev_vprintf == nullptr) {
-    s_prev_vprintf = esp_log_set_vprintf(esp_ipa_log_filter_vprintf_);
-  }
-}
 
 
 static const char *sensor_model_to_str(MipiCsiSensorModel model) {
@@ -206,12 +186,13 @@ void MipiCsiCamera::setup() {
     // The esp_ipa algorithms log their per-frame statistics at DEBUG level - roughly 10 lines
     // per frame, i.e. hundreds of lines per second while streaming. On a DEBUG-level config
     // that flood starves the main loop (loopTask watchdog reset while isp_task sat in
-    // uart_tx_all during hardware testing). esp_log_level_set() can't help here: ESPHome
-    // builds with CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=n, making it a no-op. Instead wrap the
-    // installed vprintf handler and drop DEBUG/VERBOSE messages whose tag starts with
-    // "esp_ipa" - the IDF log formatter embeds level and tag in the format string itself
-    // ("D (<ms>) esp_ipa_agc: ..."), so filtering here works regardless of that setting.
-    esp_ipa_log_filter_install_();
+    // uart_tx_all during hardware testing). Clamp the esp_ipa tags to WARN. This relies on
+    // CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y, which our Python codegen re-enables (ESPHome core
+    // defaults it to n to save memory, which would make esp_log_level_set() a no-op).
+    for (const char *tag : {"esp_ipa_ian", "esp_ipa_awb", "esp_ipa_agc", "esp_ipa_acc", "esp_ipa_adn",
+                            "esp_ipa_aen", "esp_ipa_atc", "esp_ipa_af", "esp_ipa_ext"}) {
+      esp_log_level_set(tag, ESP_LOG_WARN);
+    }
   }
 
   this->init_error_ = esp_video_init(&init_config);

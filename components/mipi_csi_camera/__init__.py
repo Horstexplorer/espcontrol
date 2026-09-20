@@ -395,6 +395,14 @@ async def to_code(config: ConfigType) -> None:
         "CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER",
         config[CONF_ISP_PIPELINE_CONTROLLER],
     )
+    if config[CONF_ISP_PIPELINE_CONTROLLER]:
+        # The pipeline controller's esp_ipa algorithms emit their per-frame statistics at DEBUG
+        # level (hundreds of lines/sec while streaming), which starves the main loop on a
+        # DEBUG-level config. We clamp the esp_ipa_* tags to WARN at runtime (see setup() in
+        # mipi_csi_camera.cpp), which requires dynamic log level control - ESPHome core defaults
+        # it to off to save memory. Later writes win over esp32's own add_idf_sdkconfig_option
+        # call, and ours runs after it.
+        add_idf_sdkconfig_option("CONFIG_LOG_DYNAMIC_LEVEL_CONTROL", True)
     add_idf_sdkconfig_option("CONFIG_CAMERA_SC2336", config[CONF_SENSOR] == "SC2336")
     add_idf_sdkconfig_option("CONFIG_CAMERA_OV5647", config[CONF_SENSOR] == "OV5647")
 

@@ -1329,11 +1329,16 @@ Configurable knobs requested: rotation, framerate, resolution, MIPI data rate
   clamp failing: ESPHome builds with `CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=n`
   (esphome/components/esp32/__init__.py), which makes `esp_log_level_set()`
   a no-op at runtime.
-- **Second fix**: wrap the installed vprintf handler
-  (`esp_log_set_vprintf`, saving the previous one) and drop DEBUG/VERBOSE
-  messages whose tag starts with `esp_ipa` - the IDF log formatter embeds
-  level and tag in the format string itself (`D (12345) esp_ipa_agc: ...`,
-  optionally ANSI-color-prefixed), so filtering there works regardless of
-  the dynamic-level-control setting. Verified via scratch
-  `esphome compile`. **Awaiting user hardware retest.**
+- **Second fix (failed)**: wrap the installed vprintf handler and drop
+  D/V messages whose format string contains the esp_ipa tag. Never
+  matched: IDF 5.5's log formatter passes the tag as a printf *argument*,
+  not inside the format string seen by the vprintf hook.
+- **Third fix**: re-enable `CONFIG_LOG_DYNAMIC_LEVEL_CONTROL` from our
+  Python codegen when the pipeline controller is on (later
+  `add_idf_sdkconfig_option` writes win over esp32 core's, and our
+  to_code runs after it), and go back to the straightforward
+  `esp_log_level_set(tag, ESP_LOG_WARN)` clamp on the esp_ipa_* tags in
+  setup(). Verified in the scratch build's sdkconfig:
+  `CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y`. **Awaiting user hardware
+  retest.**
 
